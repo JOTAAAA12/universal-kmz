@@ -29,7 +29,7 @@ const parsed = parseKmlStringToResult(fixture, 'export.kml', getSha256(fixture))
 const workbook = generateWorkbook(parsed);
 assert.deepEqual(
   workbook.SheetNames,
-  ['Resumo', 'Features', 'Pontos', 'Trechos', 'Poligonos', 'Enderecos', 'Associacoes', 'Erros_Alertas', 'Auditoria']
+  ['Resumo', 'Features', 'Pontos', 'Trechos', 'Trechos_Enderecos', 'Poligonos', 'Enderecos', 'Associacoes', 'Erros_Alertas', 'Auditoria']
 );
 
 const geojson = JSON.parse(generateGeoJson(parsed));
@@ -49,5 +49,6 @@ assert.ok(zip.file('features.geojson'));
 assert.ok(zip.file('features.kml'));
 assert.ok(zip.file('dados-normalizados.json'));
 assert.ok(zip.file('csv/resumo.csv'));
+assert.ok(zip.file('csv/trechos-enderecos.csv'));
 
 console.log('export contract regression passed');

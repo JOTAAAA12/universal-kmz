@@ -2,12 +2,23 @@ import React, { useState } from 'react';
 import { 
   Menu, Search, Filter, RefreshCw, AlertCircle, Edit, ArrowUpDown, Check, X, CheckSquare
 } from 'lucide-react';
-import { ParserResult, KmlFeature, PointFeature, TrechoFeature, PoligonoFeature, EnderecoConsulta } from '../types';
+import {
+  ParserResult,
+  KmlFeature,
+  PointFeature,
+  TrechoFeature,
+  PoligonoFeature,
+  EnderecoConsulta,
+  TrechoEndereco,
+  EnderecoPoligono
+} from '../types';
 
 interface TabelaViewProps {
   result: ParserResult;
   onUpdateResult: (updated: ParserResult) => void;
   onTriggerAuditLog: (acao: string, entidade: string, antes: string, depois: string) => void;
+  onGeocodeTrechos?: () => void;
+  isGeocodingTrechos?: boolean;
 }
 
 type TabType = 'features' | 'pontos' | 'trechos' | 'poligonos' | 'enderecos' | 'associacoes' | 'erros';
@@ -208,7 +219,36 @@ function upsertManualPointAddress(result: ParserResult, point: PointFeature): Pa
   };
 }
 
-export default function TabelaView({ result, onUpdateResult, onTriggerAuditLog }: TabelaViewProps) {
+function getLineAddressSegments(result: ParserResult, linhaId: string): TrechoEndereco[] {
+  return (result.trechos_endereco || []).filter(item => item.linha_id === linhaId);
+}
+
+function getPolygonAddress(result: ParserResult, poligonoId: string): EnderecoPoligono | undefined {
+  return (result.enderecos_poligono || []).find(item => item.poligono_id === poligonoId);
+}
+
+function formatNumberRange(segment: TrechoEndereco): string {
+  if (segment.numero_inicio === undefined && segment.numero_fim === undefined) return '';
+  if (segment.numero_inicio === segment.numero_fim || segment.numero_fim === undefined) {
+    return ` (nº ${segment.numero_inicio})`;
+  }
+  if (segment.numero_inicio === undefined) {
+    return ` (nº ${segment.numero_fim})`;
+  }
+  return ` (nº ${segment.numero_inicio}-${segment.numero_fim})`;
+}
+
+function formatTrechoEndereco(segment: TrechoEndereco): string {
+  return `${segment.logradouro}${formatNumberRange(segment)}, ${segment.extensao_m.toFixed(0)} m`;
+}
+
+export default function TabelaView({
+  result,
+  onUpdateResult,
+  onTriggerAuditLog,
+  onGeocodeTrechos,
+  isGeocodingTrechos = false
+}: TabelaViewProps) {
   const [activeTab, setActiveTab] = useState<TabType>('features');
   const [searchTerm, setSearchTerm] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -231,12 +271,19 @@ export default function TabelaView({ result, onUpdateResult, onTriggerAuditLog }
     t.nome_original.toLowerCase().includes(searchTerm.toLowerCase()) ||
     t.caminho_pasta.toLowerCase().includes(searchTerm.toLowerCase()) ||
     (t.inicio_endereco || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
-    (t.fim_endereco || '').toLowerCase().includes(searchTerm.toLowerCase())
+    (t.fim_endereco || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+    getLineAddressSegments(result, t.trecho_id)
+      .map(formatTrechoEndereco)
+      .join(' ')
+      .toLowerCase()
+      .includes(searchTerm.toLowerCase())
   );
 
   const filteredPoligonas = result.poligonos.filter(pl => 
     pl.nome_original.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    pl.caminho_pasta.toLowerCase().includes(searchTerm.toLowerCase())
+    pl.caminho_pasta.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    (getPolygonAddress(result, pl.poligono_id)?.logradouro || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+    (getPolygonAddress(result, pl.poligono_id)?.confrontantes || []).join(' ').toLowerCase().includes(searchTerm.toLowerCase())
   );
 
   const filteredEnderecos = result.enderecos.filter(e => 
@@ -378,6 +425,19 @@ export default function TabelaView({ result, onUpdateResult, onTriggerAuditLog }
             </button>
           ))}
         </div>
+
+        {onGeocodeTrechos && (
+          <button
+            type="button"
+            onClick={onGeocodeTrechos}
+            disabled={isGeocodingTrechos || (result.trechos.length === 0 && result.poligonos.length === 0)}
+            className="px-3 py-2 text-[11px] font-bold uppercase tracking-wider rounded border border-emerald-700 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-100 disabled:text-slate-400 disabled:border-slate-200 text-white transition flex items-center gap-1.5"
+            title="Geocodificar amostras de linhas e polígonos"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${isGeocodingTrechos ? 'animate-spin' : ''}`} />
+            Endereçar Trechos
+          </button>
+        )}
 
         {/* Global Filter Search */}
         <div className="relative w-full md:w-72">
@@ -632,6 +692,7 @@ export default function TabelaView({ result, onUpdateResult, onTriggerAuditLog }
                 <th className="p-3 text-right">Compr. Medido</th>
                 <th className="p-3">Início (Endereço)</th>
                 <th className="p-3">Fim (Endereço)</th>
+                <th className="p-3">Trechos Endereçados</th>
                 <th className="p-3 text-center">Inversão Direção</th>
                 <th className="p-3 text-center">Resolução</th>
                 <th className="p-3 font-semibold">Status</th>
@@ -674,6 +735,30 @@ export default function TabelaView({ result, onUpdateResult, onTriggerAuditLog }
                         {t.conflito_endereco}
                       </span>
                     )}
+                  </td>
+                  <td className="p-3 min-w-[240px] max-w-sm">
+                    {(() => {
+                      const segments = getLineAddressSegments(result, t.trecho_id);
+                      if (segments.length === 0) {
+                        return <span className="text-slate-400 italic">Não processado</span>;
+                      }
+                      return (
+                        <div className="flex flex-col gap-1">
+                          {segments.map(segment => (
+                            <span
+                              key={`${t.trecho_id}-${segment.ordem || segment.logradouro}`}
+                              className={`text-[10px] leading-snug rounded border px-2 py-1 ${
+                                segment.necessita_revisao
+                                  ? 'bg-amber-50 text-amber-800 border-amber-200'
+                                  : 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                              }`}
+                            >
+                              {formatTrechoEndereco(segment)}
+                            </span>
+                          ))}
+                        </div>
+                      );
+                    })()}
                   </td>
                   <td className="p-3 text-center">
                     <button
@@ -737,6 +822,7 @@ export default function TabelaView({ result, onUpdateResult, onTriggerAuditLog }
                 <th className="p-3 text-right">Perímetro (m)</th>
                 <th className="p-3">Centroid (Lat, Lng)</th>
                 <th className="p-3">Endereço Centroid</th>
+                <th className="p-3">Dominante / Confrontantes</th>
                 <th className="p-3 text-center">Resolução</th>
                 <th className="p-3 text-center">Status</th>
                 <th className="p-3 text-right">Ação</th>
@@ -763,6 +849,30 @@ export default function TabelaView({ result, onUpdateResult, onTriggerAuditLog }
                         {pl.conflito_endereco}
                       </span>
                     )}
+                  </td>
+                  <td className="p-3 min-w-[220px] max-w-sm">
+                    {(() => {
+                      const endereco = getPolygonAddress(result, pl.poligono_id);
+                      if (!endereco) {
+                        return <span className="text-slate-400 italic">Não processado</span>;
+                      }
+                      return (
+                        <div className="space-y-1">
+                          <span className={`block text-[10px] rounded border px-2 py-1 font-semibold ${
+                            endereco.necessita_revisao
+                              ? 'bg-amber-50 text-amber-800 border-amber-200'
+                              : 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                          }`}>
+                            {endereco.logradouro}{endereco.municipio ? `, ${endereco.municipio}` : ''}
+                          </span>
+                          {endereco.confrontantes.length > 0 && (
+                            <span className="block text-[10px] text-slate-600 bg-slate-50 border border-slate-200 rounded px-2 py-1">
+                              Confrontantes: {endereco.confrontantes.join(' | ')}
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </td>
                   <td className="p-3 text-center">
                     {(() => {

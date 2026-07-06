@@ -16,9 +16,15 @@ import {
 } from './src/geocoder';
 import { createPersistentGeocodeCache, registerGeocodeCacheShutdown } from './src/geocodeCache';
 import { GeocodeJobManager, geocodeCoordinateBatch } from './src/geocodeJobs';
+import {
+  consolidateSegments,
+  resolveDominantPolygonAddress,
+  samplePolygon,
+  samplePolyline
+} from './src/lineSampling';
 import { generateDownloadZip, generateKml, generateWorkbook } from './src/exporters';
 import * as XLSX from 'xlsx';
-import { Coordinate, ParserResult, EnderecoConsulta } from './src/types';
+import { Coordinate, ParserResult, EnderecoConsulta, EnderecoPoligono, TrechoEndereco } from './src/types';
 
 function isMockGeocoderEnabled() {
   const mode = (process.env.GEOCODER_MODE || '').trim().toLowerCase();
@@ -48,11 +54,18 @@ function normalizeCoordinate(input: any): { lat: number; lng: number } | null {
   return { lat, lng };
 }
 
+function normalizeCoordinateArray(input: any): Coordinate[] | null {
+  if (!Array.isArray(input)) return null;
+  const normalized = input.map(normalizeCoordinate);
+  if (normalized.some(coord => coord === null)) return null;
+  return normalized as Coordinate[];
+}
+
 function buildProcessingParams(input: any) {
   const parts = [
     `Tolerância de agrupamento: ${Number(input?.toleranceGroup) || 5}m`,
     `Tolerância proximidade: ${Number(input?.toleranceMatch) || 30}m`,
-    `Intervalo Amostras: ${Number(input?.sampleInterval) || 25}m`,
+    `Intervalo Amostras: ${Number(input?.sampleInterval) || 100}m`,
     `Modo Geocode: ${typeof input?.geocodeMode === 'string' ? input.geocodeMode : 'COMPLETO'}`
   ];
   return parts.join(', ');
@@ -70,6 +83,8 @@ function mergeParserResults(results: ParserResult[], fileName: string, fileHash:
     pontos: [...first.pontos],
     trechos: [...first.trechos],
     poligonos: [...first.poligonos],
+    trechos_endereco: [...(first.trechos_endereco || [])],
+    enderecos_poligono: [...(first.enderecos_poligono || [])],
     enderecos: [...first.enderecos],
     associacoes: [...first.associacoes],
     errosAlertas: [...first.errosAlertas],
@@ -82,6 +97,8 @@ function mergeParserResults(results: ParserResult[], fileName: string, fileHash:
     pontos: [...acc.pontos, ...item.pontos],
     trechos: [...acc.trechos, ...item.trechos],
     poligonos: [...acc.poligonos, ...item.poligonos],
+    trechos_endereco: [...(acc.trechos_endereco || []), ...(item.trechos_endereco || [])],
+    enderecos_poligono: [...(acc.enderecos_poligono || []), ...(item.enderecos_poligono || [])],
     enderecos: [...acc.enderecos, ...item.enderecos],
     associacoes: [...acc.associacoes, ...item.associacoes],
     errosAlertas: [...acc.errosAlertas, ...item.errosAlertas],
@@ -365,6 +382,137 @@ async function startServer() {
     } catch (err: any) {
       console.error('Error geocoding:', err);
       return res.status(500).json({ error: `Erro na geocodificação: ${err.message}` });
+    }
+  });
+
+  app.post('/api/geocode/trechos', async (req, res) => {
+    try {
+      const { linhas, poligonos, language, region } = req.body;
+      const apiKeyValue = getServerGeocodingKey();
+      const allowMock = isMockGeocoderEnabled();
+
+      if (!Array.isArray(linhas) && !Array.isArray(poligonos)) {
+        return res.status(400).json({ error: 'Informe linhas e/ou poligonos para geocodificação por trechos.' });
+      }
+
+      if (!hasEnabledGeocoderProvider(apiKeyValue, allowMock)) {
+        const googleMissing = isPlaceholderGoogleKey(apiKeyValue);
+        return res.status(503).json({
+          error: 'Nenhum provedor de geocodificação habilitado para a cadeia configurada.',
+          code: 'GEOCODER_PROVIDER_UNAVAILABLE',
+          details: googleMissing
+            ? 'Google sem chave válida foi pulado. Ajuste GEOCODER_CHAIN, configure chaves de provedores, ou habilite mock explicitamente.'
+            : 'Ajuste GEOCODER_CHAIN ou configure as chaves necessárias para os provedores selecionados.',
+          providers: getGeocoderProviderStats(apiKeyValue, allowMock)
+        });
+      }
+
+      const requestedStep = Number(req.body.stepMeters);
+      const stepMeters = Number.isFinite(requestedStep) && requestedStep > 0 ? requestedStep : 100;
+      const lineInputs = Array.isArray(linhas) ? linhas : [];
+      const polygonInputs = Array.isArray(poligonos) ? poligonos : [];
+      const allSamples: Coordinate[] = [];
+      const refs: Array<{ tipo: 'linha' | 'poligono'; id: string }> = [];
+      const lineSamples = new Map<string, Array<{ coord: Coordinate; endereco: EnderecoConsulta }>>();
+      const polygonSamples = new Map<string, Array<{ coord: Coordinate; endereco: EnderecoConsulta }>>();
+      const lineOrder: string[] = [];
+      const polygonOrder: string[] = [];
+
+      for (const item of lineInputs) {
+        const id = typeof item?.id === 'string' && item.id.trim() ? item.id.trim() : '';
+        const coords = normalizeCoordinateArray(item?.coordenadas);
+        if (!id || !coords || coords.length < 2) {
+          return res.status(400).json({ error: 'Cada linha precisa de id e pelo menos duas coordenadas válidas.' });
+        }
+
+        lineOrder.push(id);
+        lineSamples.set(id, []);
+        samplePolyline(coords, stepMeters).forEach(coord => {
+          allSamples.push(coord);
+          refs.push({ tipo: 'linha', id });
+        });
+      }
+
+      for (const item of polygonInputs) {
+        const id = typeof item?.id === 'string' && item.id.trim() ? item.id.trim() : '';
+        const coords = normalizeCoordinateArray(item?.anel_externo);
+        if (!id || !coords || coords.length < 3) {
+          return res.status(400).json({ error: 'Cada poligono precisa de id e anel_externo com pelo menos três coordenadas válidas.' });
+        }
+
+        polygonOrder.push(id);
+        polygonSamples.set(id, []);
+        samplePolygon(coords).forEach(coord => {
+          allSamples.push(coord);
+          refs.push({ tipo: 'poligono', id });
+        });
+      }
+
+      if (allSamples.length === 0) {
+        return res.json({
+          stepMeters,
+          total_amostras: 0,
+          trechos_por_linha: {},
+          endereco_por_poligono: {},
+          results: [],
+          errors: []
+        });
+      }
+
+      const safeLanguage = normalizeLanguage(language);
+      const safeRegion = normalizeRegion(region);
+      const results = await geocodeCoordinateBatch(
+        allSamples,
+        buildGeocodeOperation(apiKeyValue, allowMock, safeLanguage, safeRegion)
+      );
+
+      results.forEach((endereco, index) => {
+        const ref = refs[index];
+        const sample = { coord: allSamples[index], endereco };
+        if (ref.tipo === 'linha') {
+          lineSamples.get(ref.id)?.push(sample);
+        } else {
+          polygonSamples.get(ref.id)?.push(sample);
+        }
+      });
+
+      const trechosPorLinha: Record<string, TrechoEndereco[]> = {};
+      lineOrder.forEach(id => {
+        trechosPorLinha[id] = consolidateSegments(lineSamples.get(id) || [])
+          .map((trecho, index) => ({
+            ...trecho,
+            linha_id: id,
+            ordem: index + 1
+          }));
+      });
+
+      const enderecoPorPoligono: Record<string, EnderecoPoligono> = {};
+      polygonOrder.forEach(id => {
+        enderecoPorPoligono[id] = {
+          ...resolveDominantPolygonAddress(polygonSamples.get(id) || []),
+          poligono_id: id
+        };
+      });
+
+      const errors = buildGeocodeErrors(results);
+      const payload = {
+        mode: resolveGeocodeMode(results, allowMock),
+        stepMeters,
+        total_amostras: allSamples.length,
+        trechos_por_linha: trechosPorLinha,
+        endereco_por_poligono: enderecoPorPoligono,
+        results,
+        errors
+      };
+
+      if (errors.length > 0 && errors.length === results.length) {
+        return res.status(502).json(payload);
+      }
+
+      return res.status(errors.length > 0 ? 207 : 200).json(payload);
+    } catch (err: any) {
+      console.error('Error geocoding line/polygon segments:', err);
+      return res.status(500).json({ error: `Erro na geocodificação de trechos: ${err.message}` });
     }
   });
 

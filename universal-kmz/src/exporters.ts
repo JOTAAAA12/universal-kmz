@@ -142,6 +142,22 @@ export function generateWorkbook(data: ParserResult): XLSX.WorkBook {
   const wsTrechos = XLSX.utils.json_to_sheet(trechosRows);
   XLSX.utils.book_append_sheet(wb, wsTrechos, 'Trechos');
 
+  const trechosEnderecoRows = (data.trechos_endereco || []).map(t => ({
+    linha_id: t.linha_id || '',
+    ordem: t.ordem || '',
+    logradouro: t.logradouro,
+    numero_inicio: t.numero_inicio ?? '',
+    numero_fim: t.numero_fim ?? '',
+    bairro: t.bairro || '',
+    municipio: t.municipio || '',
+    uf: t.uf || '',
+    extensao_m: Number(t.extensao_m.toFixed(2)),
+    amostras: t.quantidade_amostras,
+    necessita_revisao: t.necessita_revisao ? 'SIM' : 'NÃO'
+  }));
+  const wsTrechosEndereco = XLSX.utils.json_to_sheet(trechosEnderecoRows);
+  XLSX.utils.book_append_sheet(wb, wsTrechosEndereco, 'Trechos_Enderecos');
+
   // 5. Aba POLIGONOS
   const poligonosRows = data.poligonos.map(p => ({
     'ID do Polígono': p.poligono_id,
@@ -269,6 +285,8 @@ export function generateGeoJson(data: ParserResult): string {
     // Find if there is an associated trecho (line segment) to enrich this feature's properties with its endpoints!
     const associatedTrecho = data.trechos.find(t => t.feature_id === f.feature_id);
     if (associatedTrecho) {
+      const addressSegments = (data.trechos_endereco || [])
+        .filter(t => t.linha_id === associatedTrecho.trecho_id);
       properties.inicio_latitude = associatedTrecho.inicio_lat;
       properties.inicio_longitude = associatedTrecho.inicio_lng;
       properties.inicio_endereco = associatedTrecho.inicio_endereco || '';
@@ -281,6 +299,34 @@ export function generateGeoJson(data: ParserResult): string {
       properties.alerta_comprimento = associatedTrecho.alerta_comprimento ? 'SIM' : 'NÃO';
       properties.inicio_fim_invertido = associatedTrecho.inicio_fim_invertido ? 'SIM' : 'NÃO';
       properties.status_trecho = associatedTrecho.status;
+      properties.trechos_endereco = addressSegments.map(t => ({
+        ordem: t.ordem,
+        logradouro: t.logradouro,
+        numero_inicio: t.numero_inicio ?? null,
+        numero_fim: t.numero_fim ?? null,
+        bairro: t.bairro || '',
+        municipio: t.municipio || '',
+        uf: t.uf || '',
+        extensao_m: Number(t.extensao_m.toFixed(2)),
+        amostras: t.quantidade_amostras,
+        necessita_revisao: t.necessita_revisao
+      }));
+      properties.trechos_endereco_resumo = addressSegments
+        .map(t => `${t.logradouro}${t.numero_inicio !== undefined ? ` ${t.numero_inicio}${t.numero_fim !== undefined && t.numero_fim !== t.numero_inicio ? `-${t.numero_fim}` : ''}` : ''} (${t.extensao_m.toFixed(0)}m)`)
+        .join(' -> ');
+    }
+
+    const associatedPolygon = data.poligonos.find(p => p.feature_id === f.feature_id);
+    if (associatedPolygon) {
+      const polygonAddress = (data.enderecos_poligono || []).find(p => p.poligono_id === associatedPolygon.poligono_id);
+      if (polygonAddress) {
+        properties.poligono_logradouro_dominante = polygonAddress.logradouro;
+        properties.poligono_bairro = polygonAddress.bairro || '';
+        properties.poligono_municipio = polygonAddress.municipio || '';
+        properties.poligono_uf = polygonAddress.uf || '';
+        properties.poligono_confrontantes = polygonAddress.confrontantes;
+        properties.poligono_necessita_revisao = polygonAddress.necessita_revisao;
+      }
     }
 
     return {

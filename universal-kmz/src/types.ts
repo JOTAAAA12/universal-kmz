@@ -104,6 +104,20 @@ export interface TrechoFeature {
   observacoes: string;
 }
 
+export interface TrechoEndereco {
+  linha_id?: string;
+  ordem?: number;
+  logradouro: string;
+  bairro?: string;
+  municipio?: string;
+  uf?: string;
+  numero_inicio?: number;
+  numero_fim?: number;
+  extensao_m: number;
+  quantidade_amostras: number;
+  necessita_revisao: boolean;
+}
+
 export interface PoligonoFeature {
   poligono_id: string;
   feature_id: string;
@@ -121,6 +135,18 @@ export interface PoligonoFeature {
   geojson: string;
   conflito_endereco?: string;
   observacoes: string;
+}
+
+export interface EnderecoPoligono {
+  poligono_id?: string;
+  logradouro: string;
+  bairro?: string;
+  municipio?: string;
+  uf?: string;
+  endereco_formatado?: string;
+  confrontantes: string[];
+  quantidade_amostras: number;
+  necessita_revisao: boolean;
 }
 
 export interface EnderecoConsulta {
@@ -221,6 +247,8 @@ export interface ParserResult {
   pontos: PointFeature[];
   trechos: TrechoFeature[];
   poligonos: PoligonoFeature[];
+  trechos_endereco?: TrechoEndereco[];
+  enderecos_poligono?: EnderecoPoligono[];
   enderecos: EnderecoConsulta[];
   associacoes: Associacao[];
   errosAlertas: ErroAlerta[];

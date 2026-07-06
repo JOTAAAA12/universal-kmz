@@ -5,7 +5,16 @@ import {
   HelpCircle, Eye, LogOut, CheckCircle, BrainCircuit
 } from 'lucide-react';
 
-import { ParserResult, Coordinate, EnderecoConsulta, PointFeature, TrechoFeature, AuditoriaLog } from './types';
+import {
+  ParserResult,
+  Coordinate,
+  EnderecoConsulta,
+  PointFeature,
+  TrechoFeature,
+  AuditoriaLog,
+  EnderecoPoligono,
+  TrechoEndereco
+} from './types';
 import UploadView from './components/UploadView';
 import SummaryView from './components/SummaryView';
 import TabelaView from './components/TabelaView';
@@ -24,7 +33,7 @@ export default function App() {
   );
   const [processingType, setProcessingType] = useState('AUTO');
   const [geocodeMode, setGeocodeMode] = useState('COMPLETO');
-  const [sampleInterval, setSampleInterval] = useState(25);
+  const [sampleInterval, setSampleInterval] = useState(100);
   const [toleranceGroup, setToleranceGroup] = useState(5);
   const [toleranceMatch, setToleranceMatch] = useState(30);
 
@@ -184,6 +193,132 @@ export default function App() {
     setGeocodeJobStatus(data.status || 'running');
     jobAppliedCountRef.current = 0;
     await pollGeocodeJob(data.id);
+  };
+
+  const tupleToCoordinate = (tuple: any): Coordinate | null => {
+    if (!Array.isArray(tuple)) return null;
+    const lng = Number(tuple[0]);
+    const lat = Number(tuple[1]);
+    const alt = tuple[2] === undefined ? undefined : Number(tuple[2]);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    return alt === undefined || Number.isFinite(alt) ? { lat, lng, alt } : { lat, lng };
+  };
+
+  const getFeatureGeometry = (featureId: string): any | null => {
+    const feature = result?.features.find(item => item.feature_id === featureId);
+    if (!feature?.geojson) return null;
+    try {
+      return JSON.parse(feature.geojson);
+    } catch {
+      return null;
+    }
+  };
+
+  const getLineCoordinates = (featureId: string): Coordinate[] | null => {
+    const geometry = getFeatureGeometry(featureId);
+    if (geometry?.type !== 'LineString' || !Array.isArray(geometry.coordinates)) return null;
+    const coords = geometry.coordinates.map(tupleToCoordinate);
+    return coords.some((coord: Coordinate | null) => coord === null) ? null : coords as Coordinate[];
+  };
+
+  const getPolygonOuterRing = (featureId: string): Coordinate[] | null => {
+    const geometry = getFeatureGeometry(featureId);
+    const outerRing = geometry?.type === 'Polygon' && Array.isArray(geometry.coordinates)
+      ? geometry.coordinates[0]
+      : null;
+    if (!Array.isArray(outerRing)) return null;
+    const coords = outerRing.map(tupleToCoordinate);
+    return coords.some((coord: Coordinate | null) => coord === null) ? null : coords as Coordinate[];
+  };
+
+  const mergeTrechosGeocodePayload = (
+    current: ParserResult,
+    payload: {
+      trechos_por_linha?: Record<string, TrechoEndereco[]>;
+      endereco_por_poligono?: Record<string, EnderecoPoligono>;
+      results?: EnderecoConsulta[];
+    }
+  ): ParserResult => {
+    const trechosEndereco = Object.values(payload.trechos_por_linha || {}).flat();
+    const enderecosPoligono = Object.values(payload.endereco_por_poligono || {});
+    const updatedEnderecos = (payload.results || []).reduce(
+      (items, addr) => mergeExternalAddressRecord(items, addr),
+      current.enderecos
+    );
+    const completedCount = updatedEnderecos.filter(item => item.endereco_formatado && item.status_api === 'SUCESSO').length;
+    const geocodedRecords = updatedEnderecos.filter(item => item.fonte !== 'Original');
+
+    return {
+      ...current,
+      trechos_endereco: trechosEndereco,
+      enderecos_poligono: enderecosPoligono,
+      enderecos: updatedEnderecos,
+      resumo: {
+        ...current.resumo,
+        resultados_completos: completedCount,
+        chamadas_realizadas: geocodedRecords.length
+      }
+    };
+  };
+
+  const handleStartTrechosGeocoding = async () => {
+    if (!result) return;
+
+    const linhas = result.trechos
+      .map(trecho => ({
+        id: trecho.trecho_id,
+        coordenadas: getLineCoordinates(trecho.feature_id)
+      }))
+      .filter((item): item is { id: string; coordenadas: Coordinate[] } => Boolean(item.coordenadas && item.coordenadas.length >= 2));
+    const poligonos = result.poligonos
+      .map(poligono => ({
+        id: poligono.poligono_id,
+        anel_externo: getPolygonOuterRing(poligono.feature_id)
+      }))
+      .filter((item): item is { id: string; anel_externo: Coordinate[] } => Boolean(item.anel_externo && item.anel_externo.length >= 3));
+
+    if (linhas.length === 0 && poligonos.length === 0) {
+      setGeocodeError('Nenhuma linha ou polígono com geometria válida para endereçamento por trechos.');
+      return;
+    }
+
+    setIsGeocoding(true);
+    setGeocodeError('');
+    setGeocodeJobStatus('running');
+    setGeocodeTotal(linhas.length + poligonos.length);
+    setGeocodeProgress(0);
+    cancelGeocodingRef.current = false;
+    addAuditLog('GEOCODE_TRECHOS_START', 'Linhas e Polígonos', '-', `Linhas: ${linhas.length}; Polígonos: ${poligonos.length}`);
+
+    try {
+      const response = await fetch('/api/geocode/trechos', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ linhas, poligonos, stepMeters: sampleInterval })
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data?.error || 'Falha ao geocodificar trechos.');
+      }
+
+      setResult(current => current ? mergeTrechosGeocodePayload(current, data) : current);
+      setGeocodeTotal(data.total_amostras || linhas.length + poligonos.length);
+      setGeocodeProgress(data.total_amostras || linhas.length + poligonos.length);
+      setGeocodeJobStatus('done');
+      if (data?.errors?.length) {
+        setGeocodeError(`${data.errors.length} amostras exigem revisão ou falharam.`);
+        addAuditLog('GEOCODE_TRECHOS_ALERT', 'Linhas e Polígonos', '-', JSON.stringify(data.errors), 'ALERTA');
+      } else {
+        addAuditLog('GEOCODE_TRECHOS_COMPLETE', 'Linhas e Polígonos', '-', `Amostras: ${data.total_amostras || 0}`, 'SUCESSO');
+      }
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Falha inesperada na geocodificação por trechos.';
+      setGeocodeError(message);
+      setGeocodeJobStatus('error');
+      addAuditLog('GEOCODE_TRECHOS_ERROR', 'Linhas e Polígonos', 'Processamento por trechos', message, 'ERRO');
+    } finally {
+      setIsGeocoding(false);
+    }
   };
 
   // Run/Resume batch geocoding loop
@@ -629,6 +764,8 @@ export default function App() {
                   result={result} 
                   onUpdateResult={(updated) => setResult(updated)} 
                   onTriggerAuditLog={addAuditLog}
+                  onGeocodeTrechos={handleStartTrechosGeocoding}
+                  isGeocodingTrechos={isGeocoding && geocodeJobStatus === 'running'}
                 />
               )}
 

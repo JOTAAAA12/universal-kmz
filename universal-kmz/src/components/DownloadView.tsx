@@ -59,7 +59,7 @@ export default function DownloadView({ result, originalName }: DownloadViewProps
   };
 
   // States for custom metadata export selection
-  const [exportTable, setExportTable] = useState<'Todo' | 'Pontos' | 'Enderecos' | 'Auditoria' | 'Trechos'>('Todo');
+  const [exportTable, setExportTable] = useState<'Todo' | 'Pontos' | 'Enderecos' | 'Auditoria' | 'Trechos' | 'Trechos_Enderecos'>('Todo');
   const [exportFormat, setExportFormat] = useState<'xlsx' | 'csv'>('xlsx');
 
   const handleExportCustomMetadata = () => {
@@ -198,7 +198,7 @@ export default function DownloadView({ result, originalName }: DownloadViewProps
             </div>
             <h3 className="font-bold text-slate-800 uppercase tracking-wider text-xs">Planilha XLSX</h3>
             <p className="text-xs text-slate-500 leading-relaxed font-mono">
-              Planilha Microsoft Excel contendo as 9 abas relacionais formatadas (Resumo, Features, Pontos, Trechos, Polígonos, Endereços).
+              Planilha Microsoft Excel contendo as abas relacionais formatadas (Resumo, Features, Pontos, Trechos, Trechos_Enderecos, Polígonos, Endereços).
             </p>
           </div>
           <button
@@ -299,6 +299,7 @@ export default function DownloadView({ result, originalName }: DownloadViewProps
                 { id: 'Enderecos', label: 'Endereços Resolvidos (Geocoding)', desc: 'Logradouro, número, bairro, município, CEP e cota calculada' },
                 { id: 'Auditoria', label: 'Logs e Registros de Auditoria', desc: 'Histórico completo de eventos, alterações e logs do workspace' },
                 { id: 'Trechos', label: 'Trechos de Obra (Cabos)', desc: 'Segmentos de linha com coordenadas de início/fim e endereços complementares' },
+                { id: 'Trechos_Enderecos', label: 'Endereços por Trecho', desc: 'Logradouro dominante por segmento de linha, extensão e revisão' },
               ].map((tab) => (
                 <label 
                   key={tab.id}

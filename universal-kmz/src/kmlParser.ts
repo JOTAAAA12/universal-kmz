@@ -1109,6 +1109,8 @@ export function parseKmlStringToResult(
     pontos,
     trechos,
     poligonos,
+    trechos_endereco: [],
+    enderecos_poligono: [],
     enderecos, // filled during parsing AND geocoding API phases
     associacoes,
     errosAlertas,

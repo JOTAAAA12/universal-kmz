@@ -12,6 +12,7 @@
     "test:precision": "tsx scripts/precision-regression.ts",
     "test:providers": "tsx scripts/provider-chain-regression.ts",
     "test:cache": "tsx scripts/cache-and-jobs-regression.ts",
+    "test:trechos": "tsx scripts/trechos-regression.ts",
     "test:upload": "tsx scripts/upload-contract-regression.ts",
     "test:export": "tsx scripts/export-contract-regression.ts",
     "test:pericial:parse": "tsx scripts/harness/pericial-parse-contract.ts",
