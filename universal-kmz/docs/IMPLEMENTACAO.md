@@ -83,3 +83,36 @@ Validacao no host (pos-sessao do Codex):
 
 - Todas as suites rodaram no host e passaram: `test:precision`, `test:providers`, `test:cache`, `test:trechos`, `test:cnefe`, `test:upload`, `test:export`, `test:pericial`, alem de `lint` e `build`.
 - Nota: dentro do sandbox do Codex os scripts `tsx` nao iniciavam (`CreateProcessAsUserW failed: 5`); a validacao final foi feita fora do sandbox.
+
+## Fase 6B - Frontend: APIs, navegacao e sessoes
+
+- Criado painel global de configuracoes em `src/components/SettingsPanel.tsx`, aberto pela engrenagem do header.
+- O painel consome `GET /api/config`, salva via `POST /api/config`, preserva chaves nao alteradas com `__KEEP__`, permite limpar campos com string vazia e nao grava chaves no `localStorage`.
+- Adicionados testes por provedor via `POST /api/config/test/:provider`, com retorno visual de sucesso/erro e mensagem real do backend.
+- Adicionada cadeia de provedores reordenavel, toggles de ViaCEP/cross-check e `stepMeters` dos trechos.
+- Criado fluxo global de sessoes em `src/components/SessionManager.tsx`, com salvar estado atual, listar, abrir e excluir sessoes via `/api/sessions`.
+- Header passou a ter botoes de configuracoes, abrir/salvar sessao, Novo arquivo com confirmacao e indicador discreto de alteracoes nao salvas.
+- Criada navegacao de fluxo em `src/components/WorkflowNav.tsx`, com Voltar e breadcrumb Upload / Tabela / Download.
+- Extraidas `GeocodeControlBar` e `WorkspaceTabs` para manter `App.tsx` menor e isolar controles de navegacao/geocodificacao.
+- Tabela de pontos passou a exibir selos de granularidade e selo `verificado` quando ha fonte externa e `necessita_revisao=false`.
+
+Validacao da Fase 6B:
+
+- `npm.cmd run lint`: passou (`tsc --noEmit`).
+- `npm.cmd run build`: passou; Vite manteve o aviso conhecido de chunk acima de 500 kB.
+
+## Fase 6A - Backend config runtime e sessoes
+
+- Criado `src/runtimeConfig.ts` para resolver config runtime sem auto-persistir defaults no boot, mascarar chaves em `GET /api/config`, aceitar `__KEEP__` em `POST /api/config` e gerar snapshot de env para a cadeia de geocoding.
+- Decisao de precedencia: `dados/config.json` guarda apenas overrides explicitamente enviados via `POST /api/config`; campos ausentes ou strings vazias legadas caem para `.env`/defaults, enquanto `null` no JSON significa limpeza explicita do usuario e bloqueia fallback para `.env`.
+- Criado `src/sessionStore.ts` para CRUD de sessoes em `dados/sessoes`, com slug seguro, limite de 100 MB e bloqueio de path traversal.
+- `server.ts` passou a expor `GET/POST /api/config`, `POST /api/config/test/:provider` e `POST/GET/DELETE /api/sessions`, usando a config runtime nas chamadas de geocoding sem reiniciar.
+- `POST /api/geocode/trechos` passou a usar `stepMeters` da config runtime quando o request nao informar valor.
+- Criado contrato curto para o frontend em `docs/API-CONFIG.md`.
+- Criado `scripts/config-and-sessions-regression.ts` e `npm run test:config`.
+
+Validacao esperada da Fase 6A:
+
+- `npm.cmd run test:config`
+- `npm.cmd run lint`
+- `npm.cmd run build`

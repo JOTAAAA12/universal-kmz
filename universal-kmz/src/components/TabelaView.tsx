@@ -10,6 +10,7 @@ import {
 import SourceBadge from './SourceBadge';
 import TrechosTable from './TrechosTable';
 import PoligonosTable from './PoligonosTable';
+import { AccuracyBadges } from './AccuracyBadges';
 
 interface TabelaViewProps {
   result: ParserResult;
@@ -508,6 +509,7 @@ export default function TabelaView({
                 <th className="p-3">Coordenadas</th>
                 <th className="p-3">Endereço / Origem</th>
                 <th className="p-3">Status API</th>
+                <th className="p-3 text-center">Exatidão</th>
                 <th className="p-3 text-center">Resolução</th>
                 <th className="p-3">Revisão</th>
                 <th className="p-3 text-right">Ação</th>
@@ -573,6 +575,9 @@ export default function TabelaView({
                     }`}>
                       {p.status_api || 'PENDENTE'}
                     </span>
+                  </td>
+                  <td className="p-3 text-center">
+                    <AccuracyBadges item={p} />
                   </td>
                   <td className="p-3 text-center">
                     {(() => {

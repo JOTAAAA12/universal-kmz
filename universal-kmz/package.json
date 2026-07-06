@@ -16,6 +16,7 @@
     "test:trechos": "tsx scripts/trechos-regression.ts",
     "test:upload": "tsx scripts/upload-contract-regression.ts",
     "test:export": "tsx scripts/export-contract-regression.ts",
+    "test:config": "tsx scripts/config-and-sessions-regression.ts",
     "test:pericial:parse": "tsx scripts/harness/pericial-parse-contract.ts",
     "test:pericial:export": "tsx scripts/harness/pericial-export-contract.ts",
     "test:pericial": "npm.cmd run test:pericial:parse && npm.cmd run test:pericial:export"

@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "universal-kmz",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "universal-kmz", "run", "dev"],
+      "port": 3000
+    }
+  ]
+}

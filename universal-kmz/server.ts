@@ -8,6 +8,7 @@ import { createServer as createViteServer } from 'vite';
 import { parseKmlStringToResult } from './src/kmlParser';
 import {
   geocodeReverse,
+  getGeocoderProviderByName,
   getGeocoderProviderStats,
   hasEnabledGeocoderProvider,
   isOperationalGeocodeFailureStatus,
@@ -26,6 +27,14 @@ import {
   samplePolyline
 } from './src/lineSampling';
 import { generateDownloadZip, generateKml, generateWorkbook } from './src/exporters';
+import {
+  getMaskedRuntimeConfig,
+  getRuntimeConfig,
+  getRuntimeGeocoderEnv,
+  loadRuntimeConfig,
+  updateRuntimeConfig
+} from './src/runtimeConfig';
+import { createSession, deleteSession, getSession, listSessions } from './src/sessionStore';
 import * as XLSX from 'xlsx';
 import { Coordinate, ParserResult, EnderecoConsulta, EnderecoPoligono, TrechoEndereco } from './src/types';
 
@@ -36,7 +45,7 @@ function isMockGeocoderEnabled() {
 }
 
 function getServerGeocodingKey() {
-  return (process.env.GOOGLE_MAPS_SERVER_KEY || '').trim();
+  return getRuntimeConfig().googleServerKey;
 }
 
 function normalizeLanguage(value: unknown) {
@@ -75,8 +84,7 @@ function buildProcessingParams(input: any) {
 }
 
 function isViaCepValidationEnabled() {
-  const value = (process.env.VIACEP_VALIDATION || '').trim().toLowerCase();
-  return value === 'true' || value === '1' || value === 'yes';
+  return getRuntimeConfig().viacepValidation;
 }
 
 function appendValidationNote(item: EnderecoConsulta, note: string): EnderecoConsulta {
@@ -180,18 +188,103 @@ async function startServer() {
   const PORT = Number(process.env.PORT) || 3000;
   const geocodeCache = createPersistentGeocodeCache();
   await geocodeCache.load();
+  await loadRuntimeConfig();
   registerGeocodeCacheShutdown(geocodeCache);
   setCnefeIndex(await loadCnefeIndex());
   const geocodeJobs = new GeocodeJobManager();
 
   // Set body parser margins to 50MB as requested by user instructions
-  app.use(express.json({ limit: '50mb' }));
-  app.use(express.urlencoded({ limit: '50mb', extended: true }));
+  app.use(express.json({ limit: '100mb' }));
+  app.use(express.urlencoded({ limit: '100mb', extended: true }));
 
   // Helper to calculate SHA256 of file stream
   const calculateSha256 = (content: string): string => {
     return crypto.createHash('sha256').update(content).digest('hex');
   };
+
+  app.get('/api/config', (_req, res) => {
+    return res.json(getMaskedRuntimeConfig());
+  });
+
+  app.post('/api/config', async (req, res) => {
+    try {
+      await updateRuntimeConfig(req.body);
+      return res.json(getMaskedRuntimeConfig());
+    } catch (err: any) {
+      return res.status(400).json({ error: err.message || 'Configuração inválida.' });
+    }
+  });
+
+  app.post('/api/config/test/:provider', async (req, res) => {
+    const providerName = String(req.params.provider || '').trim().toLowerCase();
+    const provider = getGeocoderProviderByName(providerName);
+    if (!provider) {
+      return res.status(404).json({ ok: false, status: 'UNKNOWN_PROVIDER', mensagem: 'Provedor desconhecido.' });
+    }
+
+    const env = getRuntimeGeocoderEnv();
+    const apiKeyValue = getServerGeocodingKey();
+    const result = await geocodeReverse(
+      -23.5614,
+      -46.6559,
+      apiKeyValue,
+      'pt-BR',
+      'BR',
+      {
+        allowMock: isMockGeocoderEnabled(),
+        chain: [providerName],
+        env,
+        providers: [provider],
+        skipCache: true,
+        timeoutMs: 8000
+      }
+    );
+    const stats = getGeocoderProviderStats(apiKeyValue, isMockGeocoderEnabled(), env)
+      .find(item => item.nome === providerName);
+    return res.json({
+      ok: result.status_api === 'SUCESSO' || result.status_api === 'Mocked',
+      status: result.status_api,
+      mensagem: result.provider_error_message || result.endereco_formatado || result.provider_status || '',
+      endereco_resumido: result.endereco_formatado || undefined,
+      ...(providerName === 'cnefe' ? { linhas_indexadas: stats?.linhas_indexadas || 0 } : {})
+    });
+  });
+
+  app.post('/api/sessions', async (req, res) => {
+    try {
+      return res.status(201).json(await createSession(req.body));
+    } catch (err: any) {
+      return res.status(400).json({ error: err.message || 'Sessão inválida.' });
+    }
+  });
+
+  app.get('/api/sessions', async (_req, res) => {
+    return res.json(await listSessions());
+  });
+
+  app.get('/api/sessions/:id', async (req, res) => {
+    try {
+      const session = await getSession(req.params.id);
+      if (!session) {
+        return res.status(404).json({ error: 'Sessão não encontrada.' });
+      }
+      return res.json(session);
+    } catch (err: any) {
+      return res.status(400).json({ error: err.message || 'ID de sessão inválido.' });
+    }
+  });
+
+  app.delete('/api/sessions/:id', async (req, res) => {
+    try {
+      const removed = await deleteSession(req.params.id);
+      if (!removed) {
+        return res.status(404).json({ error: 'Sessão não encontrada.' });
+      }
+      return res.status(204).send();
+    } catch (err: any) {
+      return res.status(400).json({ error: err.message || 'ID de sessão inválido.' });
+    }
+  });
 
   // API Route: Upload and Parse KML/KMZ
   app.post('/api/upload', async (req, res) => {
@@ -263,8 +356,9 @@ async function startServer() {
   app.get('/api/geocode/providers', (_req, res) => {
     const apiKeyValue = getServerGeocodingKey();
     const allowMock = isMockGeocoderEnabled();
+    const env = getRuntimeGeocoderEnv();
     return res.json({
-      providers: getGeocoderProviderStats(apiKeyValue, allowMock)
+      providers: getGeocoderProviderStats(apiKeyValue, allowMock, env)
     });
   });
 
@@ -276,7 +370,7 @@ async function startServer() {
     apiKeyValue,
     language,
     region,
-    { allowMock, cache: geocodeCache }
+    { allowMock, cache: geocodeCache, env: getRuntimeGeocoderEnv() }
   ));
 
   const buildGeocodeErrors = (results: EnderecoConsulta[]) => results
@@ -307,7 +401,8 @@ async function startServer() {
         });
       }
 
-      if (!hasEnabledGeocoderProvider(apiKeyValue, allowMock)) {
+      const env = getRuntimeGeocoderEnv();
+      if (!hasEnabledGeocoderProvider(apiKeyValue, allowMock, env)) {
         const googleMissing = isPlaceholderGoogleKey(apiKeyValue);
         return res.status(503).json({
           error: 'Nenhum provedor de geocodificação habilitado para a cadeia configurada.',
@@ -315,7 +410,7 @@ async function startServer() {
           details: googleMissing
             ? 'Google sem chave válida foi pulado. Ajuste GEOCODER_CHAIN, configure chaves de provedores, ou habilite mock explicitamente.'
             : 'Ajuste GEOCODER_CHAIN ou configure as chaves necessárias para os provedores selecionados.',
-          providers: getGeocoderProviderStats(apiKeyValue, allowMock)
+          providers: getGeocoderProviderStats(apiKeyValue, allowMock, env)
         });
       }
 
@@ -376,7 +471,8 @@ async function startServer() {
         });
       }
 
-      if (!hasEnabledGeocoderProvider(apiKeyValue, allowMock)) {
+      const env = getRuntimeGeocoderEnv();
+      if (!hasEnabledGeocoderProvider(apiKeyValue, allowMock, env)) {
         const googleMissing = isPlaceholderGoogleKey(apiKeyValue);
         return res.status(503).json({
           error: 'Nenhum provedor de geocodificação habilitado para a cadeia configurada.',
@@ -384,7 +480,7 @@ async function startServer() {
           details: googleMissing
             ? 'Google sem chave válida foi pulado. Ajuste GEOCODER_CHAIN, configure chaves de provedores, ou habilite mock explicitamente.'
             : 'Ajuste GEOCODER_CHAIN ou configure as chaves necessárias para os provedores selecionados.',
-          providers: getGeocoderProviderStats(apiKeyValue, allowMock)
+          providers: getGeocoderProviderStats(apiKeyValue, allowMock, env)
         });
       }
 
@@ -425,7 +521,8 @@ async function startServer() {
         return res.status(400).json({ error: 'Informe linhas e/ou poligonos para geocodificação por trechos.' });
       }
 
-      if (!hasEnabledGeocoderProvider(apiKeyValue, allowMock)) {
+      const env = getRuntimeGeocoderEnv();
+      if (!hasEnabledGeocoderProvider(apiKeyValue, allowMock, env)) {
         const googleMissing = isPlaceholderGoogleKey(apiKeyValue);
         return res.status(503).json({
           error: 'Nenhum provedor de geocodificação habilitado para a cadeia configurada.',
@@ -433,12 +530,12 @@ async function startServer() {
           details: googleMissing
             ? 'Google sem chave válida foi pulado. Ajuste GEOCODER_CHAIN, configure chaves de provedores, ou habilite mock explicitamente.'
             : 'Ajuste GEOCODER_CHAIN ou configure as chaves necessárias para os provedores selecionados.',
-          providers: getGeocoderProviderStats(apiKeyValue, allowMock)
+          providers: getGeocoderProviderStats(apiKeyValue, allowMock, env)
         });
       }
 
       const requestedStep = Number(req.body.stepMeters);
-      const stepMeters = Number.isFinite(requestedStep) && requestedStep > 0 ? requestedStep : 100;
+      const stepMeters = Number.isFinite(requestedStep) && requestedStep > 0 ? requestedStep : getRuntimeConfig().stepMeters;
       const lineInputs = Array.isArray(linhas) ? linhas : [];
       const polygonInputs = Array.isArray(poligonos) ? poligonos : [];
       const allSamples: Coordinate[] = [];

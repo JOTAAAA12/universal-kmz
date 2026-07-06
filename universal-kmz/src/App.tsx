@@ -1,7 +1,4 @@
 import React, { useState, useRef } from 'react';
-import { 
-  LayoutDashboard, Map as MapIcon, TableProperties, Download, Play, Pause, Square
-} from 'lucide-react';
 
 import {
   ParserResult,
@@ -18,11 +15,26 @@ import DownloadView from './components/DownloadView';
 import MapView from './components/MapView';
 import ProviderStatus from './components/ProviderStatus';
 import { AppFooter, AppHeader } from './components/AppChrome';
+import SettingsPanel from './components/SettingsPanel';
+import SessionManager, { SavedSessionMeta } from './components/SessionManager';
+import WorkflowNav from './components/WorkflowNav';
+import GeocodeControlBar from './components/GeocodeControlBar';
+import WorkspaceTabs, { WorkspaceTab } from './components/WorkspaceTabs';
 import {
   buildExistingAddressConflict,
   mergeExternalAddressRecord,
   mergePointWithGeocodedAddress,
 } from './addressConfidence';
+
+interface AppSessionPayload {
+  result: ParserResult;
+  originalFile: { name: string; size: number; raw: string } | null;
+  geocodeMode: string;
+  sampleInterval: number;
+  toleranceGroup: number;
+  toleranceMatch: number;
+  activeWorkspaceTab: WorkspaceTab;
+}
 
 export default function App() {
   // Config state
@@ -38,7 +50,10 @@ export default function App() {
   // Loaded KML state
   const [result, setResult] = useState<ParserResult | null>(null);
   const [originalFile, setOriginalFile] = useState<{ name: string; size: number; raw: string } | null>(null);
-  const [activeWorkspaceTab, setActiveWorkspaceTab] = useState<'summary' | 'map' | 'tables' | 'download'>('summary');
+  const [activeWorkspaceTab, setActiveWorkspaceTab] = useState<WorkspaceTab>('summary');
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [sessionsOpen, setSessionsOpen] = useState(false);
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
 
   // Active geocoding loop state
   const [isGeocoding, setIsGeocoding] = useState(false);
@@ -52,8 +67,13 @@ export default function App() {
   const [geocodeJobStatus, setGeocodeJobStatus] = useState<'idle' | 'running' | 'paused' | 'done' | 'error'>('idle');
   const jobAppliedCountRef = useRef(0);
 
+  const markDirty = () => {
+    setHasUnsavedChanges(true);
+  };
+
   // Unified logging for Auditoria tab
   const addAuditLog = (acao: string, entidade: string, antes: string, depois: string, status: 'SUCESSO' | 'ALERTA' | 'ERRO' = 'SUCESSO') => {
+    markDirty();
     const log: AuditoriaLog = {
       timestamp: new Date().toISOString(),
       evento: `Edição manual no Workspace: ${acao}`,
@@ -78,6 +98,7 @@ export default function App() {
     setResult(parsed);
     setOriginalFile(orig);
     setActiveWorkspaceTab('summary');
+    setHasUnsavedChanges(true);
     
     // Prep pending coordinates list based on configured geocoding mode
     analyzePendingCoordinates(parsed);
@@ -300,6 +321,7 @@ export default function App() {
       }
 
       setResult(current => current ? mergeTrechosGeocodePayload(current, data) : current);
+      markDirty();
       setGeocodeTotal(data.total_amostras || linhas.length + poligonos.length);
       setGeocodeProgress(data.total_amostras || linhas.length + poligonos.length);
       setGeocodeJobStatus('done');
@@ -382,7 +404,6 @@ export default function App() {
           }
         }
       } catch (e) {
-        console.error('Batch geocoding step crash:', e);
         const message = e instanceof Error ? e.message : 'Falha inesperada na geocodificação.';
         setGeocodeError(message);
         addAuditLog('GEOCODE_ERROR', 'Processamento API', `Coordenada: ${coord.lat},${coord.lng}`, message, 'ERRO');
@@ -427,6 +448,7 @@ export default function App() {
 
   // Reactively updatesPoints, Trechos, Polygons and Addresses cached states
   const updateStateWithGeocodedAddress = (addr: EnderecoConsulta) => {
+    markDirty();
     setResult(current => {
       if (!current) return current;
       const result = current;
@@ -542,176 +564,117 @@ export default function App() {
     });
   };
 
-  const handleResetWorkspace = () => {
+  const resetWorkspace = () => {
     setResult(null);
     setOriginalFile(null);
+    setActiveWorkspaceTab('summary');
     setCurrentIndex(0);
     setGeocodeProgress(0);
     setGeocodeJobId('');
     setGeocodeJobStatus('idle');
+    setHasUnsavedChanges(false);
+    jobAppliedCountRef.current = 0;
+  };
+
+  const handleResetWorkspace = () => {
+    if (hasUnsavedChanges && !window.confirm('Há alterações não salvas. Criar um novo arquivo mesmo assim?')) {
+      return;
+    }
+    resetWorkspace();
+  };
+
+  const handleOpenUploadFromBreadcrumb = () => {
+    handleResetWorkspace();
+  };
+
+  const handleUpdateResult = (updated: ParserResult) => {
+    setResult(updated);
+    markDirty();
+  };
+
+  const sessionPayload: AppSessionPayload | null = result ? {
+    result,
+    originalFile,
+    geocodeMode,
+    sampleInterval,
+    toleranceGroup,
+    toleranceMatch,
+    activeWorkspaceTab
+  } : null;
+
+  const defaultSessionName = originalFile?.name
+    ? `${originalFile.name.replace(/\.(kml|kmz)$/i, '')} - ${new Date().toLocaleString('pt-BR')}`
+    : `Sessão KMZ - ${new Date().toLocaleString('pt-BR')}`;
+
+  const handleOpenSessionPayload = (payload: AppSessionPayload, session: SavedSessionMeta) => {
+    if (!payload?.result) {
+      window.alert('Sessão sem payload de resultado válido.');
+      return;
+    }
+    if (hasUnsavedChanges && !window.confirm('Há alterações não salvas. Abrir outra sessão mesmo assim?')) {
+      return;
+    }
+    setResult(payload.result);
+    setOriginalFile(payload.originalFile || { name: session.nome, size: 0, raw: '' });
+    setGeocodeMode(payload.geocodeMode || 'COMPLETO');
+    setSampleInterval(payload.sampleInterval || 100);
+    setToleranceGroup(payload.toleranceGroup || 5);
+    setToleranceMatch(payload.toleranceMatch || 30);
+    setActiveWorkspaceTab(payload.activeWorkspaceTab || 'summary');
+    analyzePendingCoordinates(payload.result, payload.geocodeMode || 'COMPLETO');
+    setCurrentIndex(0);
+    setGeocodeProgress(0);
+    setGeocodeJobId('');
+    setGeocodeJobStatus('idle');
+    setHasUnsavedChanges(false);
     jobAppliedCountRef.current = 0;
   };
 
   return (
     <div className="min-h-screen bg-slate-100 flex flex-col font-sans" id="application-root">
-      <AppHeader fileName={result ? originalFile?.name : undefined} onReset={handleResetWorkspace} />
+      <AppHeader
+        fileName={result ? originalFile?.name : undefined}
+        onReset={handleResetWorkspace}
+        onOpenSettings={() => setSettingsOpen(true)}
+        onOpenSessions={() => setSessionsOpen(true)}
+        onSaveSession={() => setSessionsOpen(true)}
+        hasWorkspace={Boolean(result)}
+        hasUnsavedChanges={hasUnsavedChanges}
+      />
 
       {/* Main app body screen router */}
       <main className="flex-1 flex flex-col overflow-hidden">
         {result ? (
           /* Real loaded Workspace state view */
           <div className="max-w-7xl w-full mx-auto p-4 md:p-6 space-y-6 flex-1 overflow-y-auto" id="workspace-loaded-view">
-            
-            {/* Horizontal Geocoder Engine Bar controls (pause/play) */}
-            <div className="bg-white p-4 border border-slate-300 rounded shadow-xs flex flex-col md:flex-row items-center justify-between gap-4">
-              <div className="space-y-1 w-full md:w-auto text-center md:text-left flex-1">
-                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Estágio de Geocodificação das Coordenadas</span>
-                <div className="flex flex-wrap items-center gap-3 justify-center md:justify-start">
-                  <span className="font-mono font-bold text-slate-800 text-xs md:text-sm leading-none block">
-                    {isGeocoding 
-                      ? `RESOLVENDO COORDENADAS: ${geocodeProgress} / ${geocodeTotal}` 
-                      : `Enriquecimento de Endereços:`
-                    }
-                  </span>
-                  
-                  {!isGeocoding && (
-                    <select
-                      value={geocodeMode}
-                      onChange={(e) => {
-                        const newMode = e.target.value;
-                        setGeocodeMode(newMode);
-                        if (result) {
-                          analyzePendingCoordinates(result, newMode);
-                          setCurrentIndex(0);
-                          setGeocodeProgress(0);
-                        }
-                      }}
-                      className="p-1 border border-slate-300 rounded text-xs bg-slate-50 font-bold text-indigo-700 focus:outline-none cursor-pointer"
-                    >
-                      <option value="DESATIVADO">Offline (KML carregado ou pendente)</option>
-                      <option value="PONTOS">Apenas Pontos</option>
-                      <option value="EXTREMIDADES">Extremidades de Trechos</option>
-                      <option value="AMOSTRAGEM">Amostragem de Trechos</option>
-                      <option value="COMPLETO">Modo Completo (Pontos + Linhas + Polígonos)</option>
-                    </select>
-                  )}
-                  {isGeocoding && (
-                    <span className="text-xs bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded font-bold uppercase font-mono">
-                      {geocodeMode}
-                    </span>
-                  )}
-                  {pendingCoords.length > 20 && geocodeJobStatus !== 'idle' && (
-                    <span className="text-[10px] bg-slate-100 text-slate-700 px-2 py-0.5 rounded border border-slate-200 font-bold uppercase font-mono">
-                      Job {geocodeJobStatus}
-                    </span>
-                  )}
-                </div>
-                
-                {/* Micro progress meter */}
-                {geocodeTotal > 0 && (
-                  <div className="w-full md:w-[280px] bg-slate-100 h-2 border border-slate-200 rounded mt-1 overflow-hidden">
-                    <div 
-                      className="bg-indigo-600 h-full transition-all duration-300" 
-                      style={{ width: `${(geocodeProgress / geocodeTotal) * 100}%` }}
-                    />
-                  </div>
-                )}
-                {geocodeError && (
-                  <div className="text-[11px] text-rose-700 bg-rose-50 border border-rose-200 rounded px-3 py-2 max-w-xl">
-                    {geocodeError}
-                  </div>
-                )}
-              </div>
-
-              {/* Loop Trigger commands */}
-              <div className="flex flex-wrap gap-2 justify-center">
-                {geocodeMode === 'DESATIVADO' ? (
-                  <span className="text-[10px] text-slate-400 font-medium max-w-xs text-center md:text-right">
-                    As localizações já possuem endereços offline atribuídos. Selecione outro modo caso queira rodar geocodificação real por API.
-                  </span>
-                ) : (
-                  <>
-                    {!isGeocoding ? (
-                      <button
-                        onClick={handleStartGeocoding}
-                        disabled={currentIndex >= pendingCoords.length}
-                        className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-100 disabled:text-slate-400 disabled:border-slate-200 text-white font-bold text-xs rounded border border-indigo-700 transition cursor-pointer flex items-center gap-1.5 shadow-xs uppercase tracking-wider"
-                        id="start-enrich-geocode-btn"
-                      >
-                        <Play className="h-3.5 w-3.5" />
-                        {geocodeJobStatus === 'paused' ? 'Retomar Job' : currentIndex > 0 ? 'Retomar' : 'Iniciar Geocodificação'}
-                      </button>
-                    ) : (
-                      <button
-                        onClick={handlePauseGeocoding}
-                        className="px-4 py-2 bg-amber-500 hover:bg-amber-600 text-white font-bold text-xs rounded border border-amber-600 transition cursor-pointer flex items-center gap-1.5 shadow-xs uppercase tracking-wider"
-                        id="pause-enrich-geocode-btn"
-                      >
-                        <Pause className="h-3.5 w-3.5" /> Pausar
-                      </button>
-                    )}
-
-                    <button
-                      onClick={handleCancelGeocoding}
-                      disabled={currentIndex === 0}
-                      className="px-4 py-2 bg-slate-50 hover:bg-slate-100 text-slate-700 border border-slate-300 font-bold text-xs rounded transition cursor-pointer flex items-center gap-1.5 uppercase tracking-wider"
-                    >
-                      <Square className="h-3.5 w-3.5" /> Reiniciar
-                    </button>
-                  </>
-                )}
-              </div>
-            </div>
+            <WorkflowNav
+              activeTab={activeWorkspaceTab}
+              onBackToUpload={handleOpenUploadFromBreadcrumb}
+              onNavigate={setActiveWorkspaceTab}
+            />
+            <GeocodeControlBar
+              isGeocoding={isGeocoding}
+              geocodeProgress={geocodeProgress}
+              geocodeTotal={geocodeTotal}
+              geocodeError={geocodeError}
+              geocodeMode={geocodeMode}
+              geocodeJobStatus={geocodeJobStatus}
+              pendingCount={pendingCoords.length}
+              currentIndex={currentIndex}
+              onModeChange={(newMode) => {
+                setGeocodeMode(newMode);
+                analyzePendingCoordinates(result, newMode);
+                setCurrentIndex(0);
+                setGeocodeProgress(0);
+              }}
+              onStart={handleStartGeocoding}
+              onPause={handlePauseGeocoding}
+              onCancel={handleCancelGeocoding}
+            />
 
             <ProviderStatus />
 
-            {/* Middle Nav Tab list */}
-            <div className="flex border border-slate-300 bg-white rounded overflow-hidden" id="workspace-tabs-navigator">
-              <button
-                onClick={() => setActiveWorkspaceTab('summary')}
-                className={`flex-1 py-3 text-center transition duration-150 flex items-center justify-center gap-2 text-xs font-bold uppercase tracking-wider border-r border-slate-300 last:border-r-0 ${
-                  activeWorkspaceTab === 'summary'
-                    ? 'bg-slate-50 text-indigo-600 border-b-2 border-b-indigo-600 font-bold'
-                    : 'text-slate-500 hover:text-slate-800 hover:bg-slate-50/50'
-                }`}
-              >
-                <LayoutDashboard className="h-4 w-4" />
-                Métricas e Resumo
-              </button>
-              <button
-                onClick={() => setActiveWorkspaceTab('map')}
-                className={`flex-1 py-3 text-center transition duration-150 flex items-center justify-center gap-2 text-xs font-bold uppercase tracking-wider border-r border-slate-300 last:border-r-0 ${
-                  activeWorkspaceTab === 'map'
-                    ? 'bg-slate-50 text-indigo-600 border-b-2 border-b-indigo-600 font-bold'
-                    : 'text-slate-500 hover:text-slate-800 hover:bg-slate-50/50'
-                }`}
-              >
-                <MapIcon className="h-4 w-4" />
-                Dióptica Comercial (Mapa)
-              </button>
-              <button
-                onClick={() => setActiveWorkspaceTab('tables')}
-                className={`flex-1 py-3 text-center transition duration-150 flex items-center justify-center gap-2 text-xs font-bold uppercase tracking-wider border-r border-slate-300 last:border-r-0 ${
-                  activeWorkspaceTab === 'tables'
-                    ? 'bg-slate-50 text-indigo-600 border-b-2 border-b-indigo-600 font-bold'
-                    : 'text-slate-500 hover:text-slate-800 hover:bg-slate-50/50'
-                }`}
-              >
-                <TableProperties className="h-4 w-4" />
-                Planilha de Dados
-              </button>
-              <button
-                onClick={() => setActiveWorkspaceTab('download')}
-                className={`flex-1 py-3 text-center transition duration-150 flex items-center justify-center gap-2 text-xs font-bold uppercase tracking-wider ${
-                  activeWorkspaceTab === 'download'
-                    ? 'bg-slate-50 text-indigo-600 border-b-2 border-b-indigo-600 font-bold'
-                    : 'text-slate-500 hover:text-slate-800 hover:bg-slate-50/50'
-                }`}
-              >
-                <Download className="h-4 w-4" />
-                Download dos Dados
-              </button>
-            </div>
+            <WorkspaceTabs activeTab={activeWorkspaceTab} onChange={setActiveWorkspaceTab} />
 
             {/* Sandbox screen renders */}
             <div className="min-h-[400px]">
@@ -726,7 +689,7 @@ export default function App() {
               {activeWorkspaceTab === 'tables' && (
                 <TabelaView 
                   result={result} 
-                  onUpdateResult={(updated) => setResult(updated)} 
+                  onUpdateResult={handleUpdateResult} 
                   onTriggerAuditLog={addAuditLog}
                   onGeocodeTrechos={handleStartTrechosGeocoding}
                   isGeocodingTrechos={isGeocoding && geocodeJobStatus === 'running'}
@@ -764,6 +727,20 @@ export default function App() {
         )}
       </main>
 
+      <SettingsPanel
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        onSaved={(stepMeters) => setSampleInterval(stepMeters)}
+      />
+      <SessionManager<AppSessionPayload>
+        open={sessionsOpen}
+        canSave={Boolean(result)}
+        defaultName={defaultSessionName}
+        payload={sessionPayload}
+        onClose={() => setSessionsOpen(false)}
+        onOpenPayload={handleOpenSessionPayload}
+        onSaved={() => setHasUnsavedChanges(false)}
+      />
       <AppFooter />
     </div>
   );

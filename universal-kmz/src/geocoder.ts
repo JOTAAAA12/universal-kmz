@@ -211,6 +211,10 @@ function incrementUsage(providerName: string) {
   providerUsage.set(providerName, (providerUsage.get(providerName) || 0) + 1);
 }
 
+export function getGeocoderProviderByName(name: string): GeocodeProvider | null {
+  return BUILT_IN_PROVIDERS[name.trim().toLowerCase()] || null;
+}
+
 function envFlag(env: NodeJS.ProcessEnv, key: string): boolean {
   const value = (env[key] || '').trim().toLowerCase();
   return value === 'true' || value === '1' || value === 'yes';
