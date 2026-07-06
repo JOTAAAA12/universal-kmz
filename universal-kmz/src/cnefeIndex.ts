@@ -1,5 +1,5 @@
 import { createReadStream } from 'node:fs';
-import { mkdir, readdir, stat } from 'node:fs/promises';
+import { mkdir, readdir, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { DatabaseSync } from 'node:sqlite';
@@ -66,6 +66,10 @@ const UF_BY_CODE: Record<string, string> = {
   '50': 'MS', '51': 'MT', '52': 'GO', '53': 'DF'
 };
 const MUNICIPIOS_IBGE = municipiosIbge as Record<string, MunicipioIbgeEntry>;
+
+export function resolveCnefeDir(dir?: string): string {
+  return path.resolve(process.cwd(), dir || process.env.CNEFE_DIR || DEFAULT_DIR);
+}
 
 function parsePositiveInt(value: unknown, fallback: number): number {
   const parsed = Number(value);
@@ -142,6 +146,10 @@ function deriveUfFromFile(fileName: string): string {
   const upper = fileName.toUpperCase();
   const match = upper.match(/(?:^|[^A-Z])([A-Z]{2})(?:[^A-Z]|$)/);
   return match?.[1] || '';
+}
+
+function matchesUfSource(source: string, uf: string): boolean {
+  return deriveUfFromFile(path.basename(source)) === uf.toUpperCase();
 }
 
 function buildColumnMap(headers: string[]): ColumnMap {
@@ -531,7 +539,7 @@ function reconcileRemovedAndChangedSources(
 }
 
 export async function loadCnefeIndex(options: CnefeIndexOptions = {}): Promise<CnefeIndex> {
-  const dir = path.resolve(process.cwd(), options.dir || process.env.CNEFE_DIR || DEFAULT_DIR);
+  const dir = resolveCnefeDir(options.dir);
   const maxRows = parsePositiveInt(options.maxRows ?? process.env.CNEFE_MAX_ROWS, DEFAULT_MAX_ROWS);
   const cellDegrees = options.cellDegrees || DEFAULT_CELL_DEGREES;
   const stats: CnefeIndexStats = {
@@ -583,4 +591,81 @@ export async function loadCnefeIndex(options: CnefeIndexOptions = {}): Promise<C
   notifyProgress(stats, options.onProgress);
 
   return new SqliteCnefeIndex(stats, db, cellDegrees);
+}
+
+export interface CnefeIndexedUfStats {
+  uf: string;
+  rows: number;
+  sources: string[];
+}
+
+export async function getCnefeIndexedUfStats(dirInput?: string): Promise<CnefeIndexedUfStats[]> {
+  const dir = resolveCnefeDir(dirInput);
+  const dbPath = path.join(dir, SQLITE_FILE_NAME);
+  try {
+    await stat(dbPath);
+  } catch (error: any) {
+    if (error?.code === 'ENOENT') return [];
+    throw error;
+  }
+
+  const db = new DatabaseSync(dbPath);
+  try {
+    initDatabase(db);
+    const byUf = new Map<string, CnefeIndexedUfStats>();
+    for (const [source, meta] of readFileMeta(db)) {
+      const uf = deriveUfFromFile(path.basename(source));
+      if (!uf) continue;
+      const current = byUf.get(uf) || { uf, rows: 0, sources: [] };
+      current.rows += meta.rows || 0;
+      current.sources.push(source);
+      byUf.set(uf, current);
+    }
+    return [...byUf.values()].sort((a, b) => a.uf.localeCompare(b.uf));
+  } finally {
+    db.close();
+  }
+}
+
+export async function removeCnefeUf(ufInput: string, dirInput?: string): Promise<{ uf: string; removedFiles: number; removedRows: number }> {
+  const uf = ufInput.trim().toUpperCase();
+  const dir = resolveCnefeDir(dirInput);
+  await mkdir(dir, { recursive: true });
+  const dbPath = path.join(dir, SQLITE_FILE_NAME);
+  const db = new DatabaseSync(dbPath);
+  let removedRows = 0;
+  const sources = new Set<string>();
+
+  try {
+    initDatabase(db);
+    for (const [source, meta] of readFileMeta(db)) {
+      if (matchesUfSource(source, uf)) {
+        removedRows += meta.rows || 0;
+        sources.add(source);
+      }
+    }
+    const deleteRows = db.prepare('DELETE FROM enderecos WHERE source = ?');
+    for (const source of sources) {
+      deleteRows.run(source);
+      deleteFileMeta(db, source);
+    }
+  } finally {
+    db.close();
+  }
+
+  const files = await listCsvFiles(dir, []);
+  for (const file of files) {
+    if (matchesUfSource(file.path, uf)) sources.add(file.path);
+  }
+
+  let removedFiles = 0;
+  for (const source of sources) {
+    try {
+      await unlink(source);
+      removedFiles++;
+    } catch (error: any) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
+  }
+  return { uf, removedFiles, removedRows };
 }

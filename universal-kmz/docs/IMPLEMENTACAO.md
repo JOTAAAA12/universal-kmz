@@ -158,3 +158,16 @@ Validacao esperada da Fase 8A:
 - `npm.cmd run test:pericial`
 - `npm.cmd run lint`
 - `npm.cmd run build`
+
+## Fase 8B - Download backend de UFs CNEFE
+
+- Criado `src/cnefeDownloader.ts` com catalogo estatico das 27 UFs, download serial com retomada por `Range`, progresso por UF, extracao ZIP via `jszip`, ingestao incremental no SQLite CNEFE e cancelamento com remocao de `.part`.
+- `server.ts` passou a expor `GET /api/cnefe/estados`, `GET /api/cnefe/estados/:uf`, `POST /api/cnefe/estados/:uf/download`, `POST /api/cnefe/estados/:uf/cancelar`, `DELETE /api/cnefe/estados/:uf` e `GET /api/cnefe/disco`.
+- `src/cnefeIndex.ts` passou a expor helpers para linhas por UF e remocao de uma UF, preservando o fluxo de lookup existente.
+- Criado `scripts/cnefe-downloader-regression.ts` e `npm run test:cnefedl`, com `fetch` falso offline servindo ZIP pequeno, retomada por `Range`, ingestao SQLite e remocao da UF.
+
+Validacao esperada da Fase 8B:
+
+- `npm.cmd run test:cnefedl`
+- `npm.cmd run lint`
+- `npm.cmd run build`

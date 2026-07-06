@@ -15,7 +15,8 @@ import {
   isPlaceholderGoogleKey,
   resolveGeocodeMode
 } from './src/geocoder';
-import { loadCnefeIndex, type CnefeIndexStats } from './src/cnefeIndex';
+import { loadCnefeIndex, type CnefeIndex, type CnefeIndexStats } from './src/cnefeIndex';
+import { CnefeDownloadManager } from './src/cnefeDownloader';
 import { createPersistentGeocodeCache, registerGeocodeCacheShutdown } from './src/geocodeCache';
 import { GeocodeJobManager, geocodeCoordinateBatch } from './src/geocodeJobs';
 import { setCnefeIndex } from './src/providers/cnefe';
@@ -211,6 +212,7 @@ async function startServer() {
   const PORT = Number(process.env.PORT) || 3000;
   const geocodeCache = createPersistentGeocodeCache();
   let cnefeProviderState = buildCnefeProviderState(null, 'carregando', 'Indexação CNEFE em andamento.');
+  let activeCnefeIndex: (CnefeIndex & { close?: () => void }) | null = null;
 
   const updateCnefeProviderState = (
     stats: CnefeIndexStats | null,
@@ -225,6 +227,8 @@ async function startServer() {
     void loadCnefeIndex({
       onProgress: stats => updateCnefeProviderState(stats, 'carregando', 'Carregamento do índice CNEFE em andamento.')
     }).then(index => {
+      activeCnefeIndex?.close?.();
+      activeCnefeIndex = index as CnefeIndex & { close?: () => void };
       setCnefeIndex(index);
       updateCnefeProviderState(
         index.stats,
@@ -233,6 +237,8 @@ async function startServer() {
       );
     }).catch((err: any) => {
       const message = err?.message || 'Falha ao indexar CNEFE.';
+      activeCnefeIndex?.close?.();
+      activeCnefeIndex = null;
       setCnefeIndex(null);
       cnefeProviderState = {
         estado: 'erro',
@@ -249,6 +255,19 @@ async function startServer() {
   await loadRuntimeConfig();
   registerGeocodeCacheShutdown(geocodeCache);
   const geocodeJobs = new GeocodeJobManager();
+  const cnefeDownloader = new CnefeDownloadManager({
+    onIndexProgress: stats => updateCnefeProviderState(stats, 'carregando', 'Carregamento do índice CNEFE em andamento.'),
+    onIndexReady: index => {
+      activeCnefeIndex?.close?.();
+      activeCnefeIndex = index as CnefeIndex & { close?: () => void };
+      setCnefeIndex(index);
+      updateCnefeProviderState(
+        index.stats,
+        index.stats.indexedRows > 0 ? 'pronto' : 'ausente',
+        index.stats.indexedRows > 0 ? 'Índice CNEFE SQLite pronto.' : 'Nenhum CSV CNEFE carregado.'
+      );
+    }
+  });
 
   // Set body parser margins to 50MB as requested by user instructions
   app.use(express.json({ limit: '100mb' }));
@@ -434,6 +453,60 @@ async function startServer() {
           : provider
       ))
     });
+  });
+
+  app.get('/api/cnefe/estados', async (_req, res) => {
+    try {
+      return res.json({ estados: await cnefeDownloader.listStates() });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Falha ao listar estados CNEFE.' });
+    }
+  });
+
+  app.get('/api/cnefe/estados/:uf', async (req, res) => {
+    try {
+      const state = await cnefeDownloader.getState(req.params.uf);
+      if (!state) return res.status(404).json({ error: 'UF CNEFE desconhecida.' });
+      return res.json(state);
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Falha ao consultar estado CNEFE.' });
+    }
+  });
+
+  app.post('/api/cnefe/estados/:uf/download', async (req, res) => {
+    try {
+      return res.status(202).json(await cnefeDownloader.start(req.params.uf));
+    } catch (err: any) {
+      const message = err.message || 'Falha ao iniciar download CNEFE.';
+      const status = message.includes('ja esta') ? 409 : 400;
+      return res.status(status).json({ error: message });
+    }
+  });
+
+  app.post('/api/cnefe/estados/:uf/cancelar', async (req, res) => {
+    try {
+      const progress = await cnefeDownloader.cancel(req.params.uf);
+      if (!progress) return res.status(404).json({ error: 'UF CNEFE desconhecida.' });
+      return res.json(progress);
+    } catch (err: any) {
+      return res.status(400).json({ error: err.message || 'Falha ao cancelar download CNEFE.' });
+    }
+  });
+
+  app.delete('/api/cnefe/estados/:uf', async (req, res) => {
+    try {
+      return res.json(await cnefeDownloader.remove(req.params.uf));
+    } catch (err: any) {
+      return res.status(400).json({ error: err.message || 'Falha ao remover CNEFE da UF.' });
+    }
+  });
+
+  app.get('/api/cnefe/disco', async (_req, res) => {
+    try {
+      return res.json(await cnefeDownloader.disk());
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Falha ao consultar disco CNEFE.' });
+    }
   });
 
   const buildGeocodeOperation = (apiKeyValue: string, allowMock: boolean, language: string, region: string) => async (

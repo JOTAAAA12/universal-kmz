@@ -1,5 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { ArrowDown, ArrowUp, CheckCircle2, Eye, EyeOff, Loader2, Save, Settings, X, XCircle } from 'lucide-react';
+import { ArrowDown, ArrowUp, CheckCircle2, Database, Eye, EyeOff, KeyRound, Loader2, Save, Settings, X, XCircle } from 'lucide-react';
+
+import CnefeManager from './CnefeManager';
 
 const KEEP_SECRET = '__KEEP__';
 const PROVIDERS = ['google', 'locationiq', 'geoapify', 'nominatim', 'photon', 'bigdatacloud', 'cnefe', 'mock'];
@@ -82,6 +84,7 @@ export default function SettingsPanel({
   const [error, setError] = useState('');
   const [testing, setTesting] = useState('');
   const [testResults, setTestResults] = useState<Record<string, TestResult>>({});
+  const [activeTab, setActiveTab] = useState<'apis' | 'cnefe'>('apis');
 
   useEffect(() => {
     if (!open) return;
@@ -197,7 +200,7 @@ export default function SettingsPanel({
         <header className="sticky top-0 z-10 flex items-center justify-between border-b border-slate-300 bg-white px-5 py-4">
           <div className="flex items-center gap-2">
             <Settings className="h-4 w-4 text-indigo-600" />
-            <h2 className="text-sm font-bold uppercase tracking-wider text-slate-800">Configurações de APIs</h2>
+            <h2 className="text-sm font-bold uppercase tracking-wider text-slate-800">Configurações</h2>
           </div>
           <button type="button" onClick={onClose} className="rounded p-1 text-slate-500 hover:bg-slate-100 hover:text-slate-900">
             <X className="h-4 w-4" />
@@ -205,6 +208,29 @@ export default function SettingsPanel({
         </header>
 
         <div className="space-y-5 p-5">
+          <div className="flex flex-wrap gap-2 border-b border-slate-200 pb-3">
+            <button
+              type="button"
+              onClick={() => setActiveTab('apis')}
+              className={`inline-flex items-center gap-2 rounded border px-3 py-2 text-xs font-bold uppercase tracking-wider ${activeTab === 'apis' ? 'border-indigo-200 bg-indigo-50 text-indigo-700' : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'}`}
+            >
+              <KeyRound className="h-4 w-4" />
+              APIs
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('cnefe')}
+              className={`inline-flex items-center gap-2 rounded border px-3 py-2 text-xs font-bold uppercase tracking-wider ${activeTab === 'cnefe' ? 'border-indigo-200 bg-indigo-50 text-indigo-700' : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'}`}
+            >
+              <Database className="h-4 w-4" />
+              Base de Endereços CNEFE
+            </button>
+          </div>
+
+          {activeTab === 'cnefe' && <CnefeManager />}
+
+          {activeTab === 'apis' && (
+            <>
           {loading && <div className="text-xs font-semibold text-slate-500">Carregando configuração...</div>}
           {error && <div className="rounded border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700">{error}</div>}
           {toast && <div className="rounded border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-700">{toast}</div>}
@@ -266,14 +292,16 @@ export default function SettingsPanel({
               </label>
             </div>
           </div>
+            </>
+          )}
         </div>
 
-        <footer className="sticky bottom-0 flex justify-end border-t border-slate-300 bg-white px-5 py-4">
+        {activeTab === 'apis' && <footer className="sticky bottom-0 flex justify-end border-t border-slate-300 bg-white px-5 py-4">
           <button type="button" onClick={save} disabled={saving || loading} className="inline-flex items-center gap-2 rounded border border-indigo-700 bg-indigo-600 px-4 py-2 text-xs font-bold uppercase tracking-wider text-white transition hover:bg-indigo-700 disabled:opacity-60">
             {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
             Salvar
           </button>
-        </footer>
+        </footer>}
       </section>
     </div>
   );
