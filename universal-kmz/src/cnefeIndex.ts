@@ -3,6 +3,8 @@ import { readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 
+import municipiosIbge from './data/municipios-ibge.json';
+
 export interface CnefeAddressRecord {
   id: string;
   lat: number;
@@ -13,6 +15,7 @@ export interface CnefeAddressRecord {
   municipio: string;
   uf: string;
   cep: string;
+  municipioResolvido: boolean;
 }
 
 export interface CnefeNearestMatch {
@@ -39,9 +42,11 @@ interface CnefeIndexOptions {
   dir?: string;
   maxRows?: number;
   cellDegrees?: number;
+  onProgress?: (stats: CnefeIndexStats) => void;
 }
 
-type ColumnMap = Record<keyof Omit<CnefeAddressRecord, 'lat' | 'lng' | 'logradouro'> | 'lat' | 'lng' | 'tipo' | 'titulo' | 'nome', number>;
+type ColumnMap = Record<keyof Omit<CnefeAddressRecord, 'lat' | 'lng' | 'logradouro' | 'municipioResolvido'> | 'lat' | 'lng' | 'tipo' | 'titulo' | 'nome' | 'codMunicipio', number>;
+type MunicipioIbgeEntry = { nome: string; uf: string };
 
 const DEFAULT_DIR = './dados/cnefe';
 const DEFAULT_MAX_ROWS = 3000000;
@@ -54,6 +59,7 @@ const UF_BY_CODE: Record<string, string> = {
   '41': 'PR', '42': 'SC', '43': 'RS',
   '50': 'MS', '51': 'MT', '52': 'GO', '53': 'DF'
 };
+const MUNICIPIOS_IBGE = municipiosIbge as Record<string, MunicipioIbgeEntry>;
 
 function parsePositiveInt(value: unknown, fallback: number): number {
   const parsed = Number(value);
@@ -118,6 +124,10 @@ function compact(parts: string[]): string {
   return parts.map(part => part.trim()).filter(Boolean).join(' ');
 }
 
+function onlyDigits(value: string): string {
+  return value.replace(/\D/g, '');
+}
+
 function cellKey(lat: number, lng: number, cellDegrees: number): string {
   return `${Math.round(lat / cellDegrees)}:${Math.round(lng / cellDegrees)}`;
 }
@@ -146,7 +156,8 @@ function buildColumnMap(headers: string[]): ColumnMap {
     nome: pickColumn(headers, ['nome_logradouro', 'nom_seglogr', 'logradouro']),
     numero: pickColumn(headers, ['NUM_ENDERECO', 'numero', 'num']),
     bairro: pickColumn(headers, ['DSC_LOCALIDADE', 'localidade', 'bairro']),
-    municipio: pickColumn(headers, ['NOM_MUNICIPIO', 'municipio', 'cidade']),
+    municipio: pickColumn(headers, ['NOM_MUNICIPIO', 'nome_municipio', 'municipio', 'cidade']),
+    codMunicipio: pickColumn(headers, ['COD_MUNICIPIO', 'codigo_municipio', 'cod_mun']),
     uf: pickColumn(headers, ['UF', 'COD_UF', 'sigla_uf']),
     cep: pickColumn(headers, ['CEP', 'cod_cep']),
     lat: pickColumn(headers, ['LATITUDE', 'lat']),
@@ -158,13 +169,51 @@ function valueAt(row: string[], index: number): string {
   return index >= 0 ? (row[index] || '').trim() : '';
 }
 
+function resolveMunicipio(
+  municipioRaw: string,
+  codMunicipioRaw: string,
+  ufRaw: string,
+  fallbackUf: string
+): { municipio: string; uf: string; municipioResolvido: boolean } {
+  const municipioCode = onlyDigits(codMunicipioRaw) || (/^\d{7}$/.test(municipioRaw.trim()) ? municipioRaw.trim() : '');
+  const municipioEntry = municipioCode ? MUNICIPIOS_IBGE[municipioCode] : undefined;
+  const uf = municipioEntry?.uf || UF_BY_CODE[ufRaw] || ufRaw.toUpperCase() || fallbackUf;
+
+  if (municipioEntry) {
+    return {
+      municipio: municipioEntry.nome,
+      uf,
+      municipioResolvido: true
+    };
+  }
+
+  if (municipioCode && (!municipioRaw || municipioRaw.trim() === municipioCode)) {
+    return {
+      municipio: municipioCode,
+      uf,
+      municipioResolvido: false
+    };
+  }
+
+  return {
+    municipio: municipioRaw,
+    uf,
+    municipioResolvido: Boolean(municipioRaw)
+  };
+}
+
 function mapRow(row: string[], columns: ColumnMap, fallbackUf: string): CnefeAddressRecord | null {
   const lat = parseNumber(valueAt(row, columns.lat));
   const lng = parseNumber(valueAt(row, columns.lng));
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
 
   const ufRaw = valueAt(row, columns.uf);
-  const uf = UF_BY_CODE[ufRaw] || ufRaw.toUpperCase() || fallbackUf;
+  const resolvedMunicipio = resolveMunicipio(
+    valueAt(row, columns.municipio),
+    valueAt(row, columns.codMunicipio),
+    ufRaw,
+    fallbackUf
+  );
   const logradouro = compact([
     valueAt(row, columns.tipo),
     valueAt(row, columns.titulo),
@@ -178,9 +227,10 @@ function mapRow(row: string[], columns: ColumnMap, fallbackUf: string): CnefeAdd
     logradouro,
     numero: valueAt(row, columns.numero),
     bairro: valueAt(row, columns.bairro),
-    municipio: valueAt(row, columns.municipio),
-    uf,
-    cep: valueAt(row, columns.cep).replace(/\D/g, '')
+    municipio: resolvedMunicipio.municipio,
+    uf: resolvedMunicipio.uf,
+    cep: onlyDigits(valueAt(row, columns.cep)),
+    municipioResolvido: resolvedMunicipio.municipioResolvido
   };
 }
 
@@ -243,7 +293,16 @@ async function listCsvFiles(dir: string, messages: string[]): Promise<string[]> 
   }
 }
 
-async function loadFile(filePath: string, index: GridCnefeIndex, maxRows: number): Promise<void> {
+function notifyProgress(stats: CnefeIndexStats, onProgress?: (stats: CnefeIndexStats) => void) {
+  onProgress?.(stats);
+}
+
+async function loadFile(
+  filePath: string,
+  index: GridCnefeIndex,
+  maxRows: number,
+  onProgress?: (stats: CnefeIndexStats) => void
+): Promise<void> {
   const stream = createReadStream(filePath, { encoding: 'utf8' });
   const reader = createInterface({ input: stream, crlfDelay: Infinity });
   let delimiter = ';';
@@ -257,6 +316,7 @@ async function loadFile(filePath: string, index: GridCnefeIndex, maxRows: number
       columns = buildColumnMap(parseCsvLine(line.replace(/^\uFEFF/, ''), delimiter));
       if (columns.lat < 0 || columns.lng < 0) {
         index.stats.messages.push(`Arquivo ignorado sem latitude/longitude reconhecida: ${path.basename(filePath)}`);
+        notifyProgress(index.stats, onProgress);
         return;
       }
       continue;
@@ -264,6 +324,7 @@ async function loadFile(filePath: string, index: GridCnefeIndex, maxRows: number
     if (index.stats.indexedRows >= maxRows) {
       index.stats.partial = true;
       index.stats.messages.push(`Índice CNEFE parcial: limite CNEFE_MAX_ROWS=${maxRows} atingido.`);
+      notifyProgress(index.stats, onProgress);
       return;
     }
     const record = mapRow(parseCsvLine(line, delimiter), columns, fallbackUf);
@@ -272,7 +333,12 @@ async function loadFile(filePath: string, index: GridCnefeIndex, maxRows: number
     } else {
       index.stats.skippedRows++;
     }
+    const processedRows = index.stats.indexedRows + index.stats.skippedRows;
+    if (processedRows % 10000 === 0) {
+      notifyProgress(index.stats, onProgress);
+    }
   }
+  notifyProgress(index.stats, onProgress);
 }
 
 export async function loadCnefeIndex(options: CnefeIndexOptions = {}): Promise<CnefeIndex> {
@@ -288,16 +354,20 @@ export async function loadCnefeIndex(options: CnefeIndexOptions = {}): Promise<C
     messages: []
   };
   const index = new GridCnefeIndex(stats, options.cellDegrees || DEFAULT_CELL_DEGREES);
+  notifyProgress(stats, options.onProgress);
   const files = await listCsvFiles(dir, stats.messages);
   stats.files = files.length;
+  notifyProgress(stats, options.onProgress);
 
   for (const file of files) {
     if (stats.partial) break;
-    await loadFile(file, index, maxRows);
+    await loadFile(file, index, maxRows, options.onProgress);
+    notifyProgress(stats, options.onProgress);
   }
 
   if (stats.indexedRows === 0 && files.length === 0) {
     stats.messages.push('Nenhum CSV CNEFE carregado.');
   }
+  notifyProgress(stats, options.onProgress);
   return index;
 }

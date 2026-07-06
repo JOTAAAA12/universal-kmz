@@ -116,3 +116,20 @@ Validacao esperada da Fase 6A:
 - `npm.cmd run test:config`
 - `npm.cmd run lint`
 - `npm.cmd run build`
+
+## Fase 7 - CNEFE-SP completo e tabela de municipios
+
+- CNEFE-SP instalado no ambiente de desenvolvimento com 22.953.725 linhas.
+- `CNEFE_MAX_ROWS=23000000` usado para permitir indexacao completa do arquivo estadual.
+- Desenvolvimento local validado com heap Node de 12 GB (`--max-old-space-size=12288`) para suportar a carga CNEFE-SP completa.
+- Adicionada tabela local `src/data/municipios-ibge.json` com 5.571 municipios IBGE para resolver `COD_MUNICIPIO` em nome do municipio e UF.
+- CNEFE passa a manter codigo de municipio desconhecido sem inventar nome e marca revisao obrigatoria nesse caso.
+- Indexacao CNEFE passou a rodar em background apos `app.listen`, sem bloquear o boot do servidor.
+- Enquanto o indice carrega, `/api/geocode/providers` reporta `estado=carregando` e `linhas_indexadas`; ao concluir muda para `pronto`, `ausente` ou `erro` sem restart.
+
+Validacao esperada da Fase 7:
+
+- `npm.cmd run test:cnefe`
+- `npm.cmd run test:upload`
+- `npm.cmd run lint`
+- `npm.cmd run build`

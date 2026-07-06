@@ -1,4 +1,5 @@
 import { EnderecoConsulta } from './types';
+import { normalizeAddressValue } from './addressConfidence';
 import { getDistanceMeters } from './kmlParser';
 import { bigDataCloudProvider } from './providers/bigdatacloud';
 import { cnefeProvider } from './providers/cnefe';
@@ -220,15 +221,6 @@ function envFlag(env: NodeJS.ProcessEnv, key: string): boolean {
   return value === 'true' || value === '1' || value === 'yes';
 }
 
-function normalizeComparable(value?: string): string {
-  return (value || '')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim();
-}
-
 function appendValidationNote(item: EnderecoConsulta, note: string): EnderecoConsulta {
   return {
     ...item,
@@ -249,10 +241,10 @@ function shouldCrossCheck(item: EnderecoConsulta, env: NodeJS.ProcessEnv): boole
 }
 
 function providersAgree(primary: EnderecoConsulta, secondary: EnderecoConsulta): boolean {
-  const primaryStreet = normalizeComparable(primary.logradouro);
-  const secondaryStreet = normalizeComparable(secondary.logradouro);
-  const primaryCity = normalizeComparable(primary.municipio);
-  const secondaryCity = normalizeComparable(secondary.municipio);
+  const primaryStreet = normalizeAddressValue(primary.logradouro);
+  const secondaryStreet = normalizeAddressValue(secondary.logradouro);
+  const primaryCity = normalizeAddressValue(primary.municipio);
+  const secondaryCity = normalizeAddressValue(secondary.municipio);
   return Boolean(primaryStreet && secondaryStreet && primaryCity && secondaryCity
     && primaryStreet === secondaryStreet
     && primaryCity === secondaryCity);

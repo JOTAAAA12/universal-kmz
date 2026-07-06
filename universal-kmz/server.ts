@@ -15,7 +15,7 @@ import {
   isPlaceholderGoogleKey,
   resolveGeocodeMode
 } from './src/geocoder';
-import { loadCnefeIndex } from './src/cnefeIndex';
+import { loadCnefeIndex, type CnefeIndexStats } from './src/cnefeIndex';
 import { createPersistentGeocodeCache, registerGeocodeCacheShutdown } from './src/geocodeCache';
 import { GeocodeJobManager, geocodeCoordinateBatch } from './src/geocodeJobs';
 import { setCnefeIndex } from './src/providers/cnefe';
@@ -91,6 +91,29 @@ function appendValidationNote(item: EnderecoConsulta, note: string): EnderecoCon
   return {
     ...item,
     observacao_validacao: [item.observacao_validacao, note].filter(Boolean).join(' | ')
+  };
+}
+
+type CnefeProviderLoadState = {
+  estado: 'carregando' | 'pronto' | 'ausente' | 'erro';
+  linhas_indexadas: number;
+  indice_parcial: boolean;
+  mensagens: string[];
+  mensagem?: string;
+};
+
+function buildCnefeProviderState(
+  stats: CnefeIndexStats | null,
+  estado: CnefeProviderLoadState['estado'],
+  fallbackMessage: string
+): CnefeProviderLoadState {
+  const mensagens = stats?.messages.length ? stats.messages : [fallbackMessage];
+  return {
+    estado,
+    linhas_indexadas: stats?.indexedRows || 0,
+    indice_parcial: Boolean(stats?.partial),
+    mensagens,
+    mensagem: mensagens[mensagens.length - 1]
   };
 }
 
@@ -187,10 +210,44 @@ async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
   const geocodeCache = createPersistentGeocodeCache();
+  let cnefeProviderState = buildCnefeProviderState(null, 'carregando', 'Indexação CNEFE em andamento.');
+
+  const updateCnefeProviderState = (
+    stats: CnefeIndexStats | null,
+    estado: CnefeProviderLoadState['estado'],
+    fallbackMessage: string
+  ) => {
+    cnefeProviderState = buildCnefeProviderState(stats, estado, fallbackMessage);
+  };
+
+  const startCnefeIndexInBackground = () => {
+    updateCnefeProviderState(null, 'carregando', 'Indexação CNEFE em andamento.');
+    void loadCnefeIndex({
+      onProgress: stats => updateCnefeProviderState(stats, 'carregando', 'Indexação CNEFE em andamento.')
+    }).then(index => {
+      setCnefeIndex(index);
+      updateCnefeProviderState(
+        index.stats,
+        index.stats.indexedRows > 0 ? 'pronto' : 'ausente',
+        index.stats.indexedRows > 0 ? 'Índice CNEFE pronto.' : 'Nenhum CSV CNEFE carregado.'
+      );
+    }).catch((err: any) => {
+      const message = err?.message || 'Falha ao indexar CNEFE.';
+      setCnefeIndex(null);
+      cnefeProviderState = {
+        estado: 'erro',
+        linhas_indexadas: 0,
+        indice_parcial: false,
+        mensagens: [message],
+        mensagem: message
+      };
+      console.error('Erro ao indexar CNEFE:', err);
+    });
+  };
+
   await geocodeCache.load();
   await loadRuntimeConfig();
   registerGeocodeCacheShutdown(geocodeCache);
-  setCnefeIndex(await loadCnefeIndex());
   const geocodeJobs = new GeocodeJobManager();
 
   // Set body parser margins to 50MB as requested by user instructions
@@ -246,7 +303,13 @@ async function startServer() {
       status: result.status_api,
       mensagem: result.provider_error_message || result.endereco_formatado || result.provider_status || '',
       endereco_resumido: result.endereco_formatado || undefined,
-      ...(providerName === 'cnefe' ? { linhas_indexadas: stats?.linhas_indexadas || 0 } : {})
+      ...(providerName === 'cnefe' ? {
+        estado: cnefeProviderState.estado,
+        linhas_indexadas: cnefeProviderState.linhas_indexadas,
+        mensagem_indexacao: cnefeProviderState.mensagem,
+        indice_parcial: cnefeProviderState.indice_parcial,
+        linhas_indexadas_estatistica: stats?.linhas_indexadas || 0
+      } : {})
     });
   });
 
@@ -358,7 +421,18 @@ async function startServer() {
     const allowMock = isMockGeocoderEnabled();
     const env = getRuntimeGeocoderEnv();
     return res.json({
-      providers: getGeocoderProviderStats(apiKeyValue, allowMock, env)
+      providers: getGeocoderProviderStats(apiKeyValue, allowMock, env).map(provider => (
+        provider.nome === 'cnefe'
+          ? {
+            ...provider,
+            estado: cnefeProviderState.estado,
+            linhas_indexadas: cnefeProviderState.linhas_indexadas,
+            indice_parcial: cnefeProviderState.indice_parcial,
+            mensagens: cnefeProviderState.mensagens,
+            mensagem: cnefeProviderState.mensagem
+          }
+          : provider
+      ))
     });
   });
 
@@ -715,7 +789,9 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0');
+  app.listen(PORT, '0.0.0.0', () => {
+    startCnefeIndexInBackground();
+  });
 }
 
 startServer();

@@ -20,21 +20,27 @@ try {
     '2;Avenida;Doutor;Brasil;200;Jardim;Sao Paulo;SP;01002000;-23.551000;-46.634000',
     '3;Travessa;;Curta;5;Vila;Sao Paulo;SP;01003000;-23.552000;-46.632500',
     '4;Rua;;Longe;1;Centro;Sao Paulo;SP;01004000;-23.560000;-46.650000',
-    '5;Rua;;Principal;99;Centro;Campinas;SP;13010000;-22.905560;-47.060830',
-    '6;Avenida;;Secundaria;101;Cambui;Campinas;SP;13020000;-22.906000;-47.061000',
-    '7;Rua;;Alternativa;102;Cambui;Campinas;SP;13030000;-22.907000;-47.062000',
-    '8;Estrada;;Rural;S/N;Zona Rural;Campinas;SP;13040000;-22.908000;-47.063000'
+    '5;Rua;;Principal;99;Centro;Campinas;SP;13010000;-22.915560;-47.070830',
+    '6;Avenida;;Secundaria;101;Cambui;Campinas;SP;13020000;-22.916000;-47.071000',
+    '7;Rua;;Alternativa;102;Cambui;Campinas;SP;13030000;-22.917000;-47.072000',
+    '8;Estrada;;Rural;S/N;Zona Rural;Campinas;SP;13040000;-22.918000;-47.073000'
   ].join('\n');
   const altCsv = [
     'COD_UNICO_ENDERECO;NOM_SEGLOGR;NUM_ENDERECO;DSC_LOCALIDADE;NOM_MUNICIPIO;CEP;LATITUDE;LONGITUDE',
     '9;Rua Nome Alternativo;321;Centro;Sao Paulo;01005000;-23.550600;-46.633250'
   ].join('\n');
+  const ibgeCodeCsv = [
+    'COD_UNICO_ENDERECO;TIPO_LOGRADOURO;NOME_LOGRADOURO;NUM_ENDERECO;DSC_LOCALIDADE;COD_MUNICIPIO;CEP;LATITUDE;LONGITUDE',
+    '10;RUA;JOSE PAULINO;1010;CENTRO;3509502;13013001;-22.905560;-47.060830',
+    '11;RUA;CODIGO DESCONHECIDO;1;CENTRO;9999999;13013002;-22.905000;-47.060000'
+  ].join('\n');
 
   await writeFile(path.join(tmp, 'SP_fixture.csv'), csv, 'utf8');
   await writeFile(path.join(tmp, 'cnefe_alt_headers_SP.csv'), altCsv, 'utf8');
+  await writeFile(path.join(tmp, 'cnefe_ibge_codes_SP.csv'), ibgeCodeCsv, 'utf8');
 
   const index = await loadCnefeIndex({ dir: tmp, maxRows: 100 });
-  assert.equal(index.stats.indexedRows, 9);
+  assert.equal(index.stats.indexedRows, 11);
   assert.equal(index.stats.partial, false);
 
   const provider = createCnefeProvider(index);
@@ -71,6 +77,42 @@ try {
   });
   assert.equal(alternativeHeaders.logradouro, 'Rua Nome Alternativo');
   assert.equal(alternativeHeaders.numero, '321');
+
+  const campinasByIbgeCode = await provider.reverse({
+    lat: -22.90556,
+    lng: -47.06083,
+    apiKey: '',
+    language: 'pt-BR',
+    region: 'BR',
+    allowMock: false,
+    env: {},
+    timeoutMs: 10000
+  });
+  assert.equal(campinasByIbgeCode.status_api, 'SUCESSO');
+  assert.equal(campinasByIbgeCode.logradouro, 'RUA JOSE PAULINO');
+  assert.equal(campinasByIbgeCode.numero, '1010');
+  assert.equal(campinasByIbgeCode.bairro, 'CENTRO');
+  assert.equal(campinasByIbgeCode.municipio, 'Campinas');
+  assert.equal(campinasByIbgeCode.uf, 'SP');
+  assert.equal(campinasByIbgeCode.cep, '13013001');
+  assert.equal(campinasByIbgeCode.endereco_formatado, 'RUA JOSE PAULINO, 1010 - CENTRO - Campinas - SP - 13013-001');
+  assert.equal(campinasByIbgeCode.granularidade, 'CNEFE_ALTA');
+  assert.equal(campinasByIbgeCode.necessita_revisao, false);
+
+  const unknownMunicipioCode = await provider.reverse({
+    lat: -22.90500,
+    lng: -47.06000,
+    apiKey: '',
+    language: 'pt-BR',
+    region: 'BR',
+    allowMock: false,
+    env: {},
+    timeoutMs: 10000
+  });
+  assert.equal(unknownMunicipioCode.status_api, 'SUCESSO');
+  assert.equal(unknownMunicipioCode.municipio, '9999999');
+  assert.equal(unknownMunicipioCode.uf, 'SP');
+  assert.equal(unknownMunicipioCode.necessita_revisao, true);
 
   const mid = await provider.reverse({
     lat: -23.55160,
@@ -128,7 +170,7 @@ try {
       quantidade_resultados: 1,
       fonte: 'first-fake',
       logradouro: 'Rua das Flores',
-      municipio: 'Sao Paulo',
+      municipio: 'São Paulo',
       uf: 'SP',
       necessita_revisao: true,
       granularidade: 'STREET'
@@ -144,8 +186,8 @@ try {
         provider_status: 'OK',
         quantidade_resultados: 1,
         fonte: 'agree-fake',
-        logradouro: 'Rua das Flores',
-        municipio: 'Sao Paulo',
+        logradouro: 'RUA DAS FLORES',
+        municipio: 'sao paulo',
         uf: 'SP',
         necessita_revisao: false,
         granularidade: 'ROOFTOP-like'

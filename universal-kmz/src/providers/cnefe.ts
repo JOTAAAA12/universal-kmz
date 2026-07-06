@@ -9,6 +9,7 @@ interface CnefeAddressRecord {
   municipio: string;
   uf: string;
   cep: string;
+  municipioResolvido?: boolean;
 }
 
 interface CnefeLookupIndex {
@@ -25,18 +26,26 @@ interface CnefeLookupIndex {
 
 let activeIndex: CnefeLookupIndex | null = null;
 
+function formatCep(cep: string): string {
+  const digits = cep.replace(/\D/g, '');
+  return digits.length === 8 ? `${digits.slice(0, 5)}-${digits.slice(5)}` : cep;
+}
+
 function formatAddress(record: CnefeAddressRecord): string {
   const parts = [
     [record.logradouro, record.numero].filter(Boolean).join(', '),
     record.bairro,
     record.municipio,
     record.uf,
-    record.cep
+    formatCep(record.cep)
   ].filter(Boolean);
   return parts.join(' - ');
 }
 
-function granularityForDistance(distanceMeters: number) {
+function granularityForDistance(distanceMeters: number, record: CnefeAddressRecord) {
+  if (record.municipioResolvido === false) {
+    return { granularidade: 'CNEFE_ALTA', necessita_revisao: true };
+  }
   if (distanceMeters <= 30) {
     return { granularidade: 'CNEFE_ALTA', necessita_revisao: false };
   }
@@ -79,7 +88,7 @@ export function createCnefeProvider(index: CnefeLookupIndex): GeocodeProvider {
         cep: record.cep,
         pais: 'Brasil',
         tipos: `cnefe_nearest_${Math.round(distanceMeters)}m`,
-        ...granularityForDistance(distanceMeters)
+        ...granularityForDistance(distanceMeters, record)
       });
     },
     getStatus: () => ({
