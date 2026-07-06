@@ -76,7 +76,7 @@ const externalMismatch: EnderecoConsulta = {
   pais: 'Brasil',
   status_api: 'SUCESSO',
   quantidade_resultados: 1,
-  fonte: 'Google API',
+  fonte: 'google',
   cache_hit: false,
   necessita_revisao: false
 };
@@ -93,7 +93,7 @@ assert.match(mergedMismatch.conflito_endereco || '', /OutraCidade/);
 
 const mergedAddresses = mergeExternalAddressRecord(withCity.enderecos, externalMismatch);
 assert.equal(mergedAddresses.length, 1);
-assert.equal(mergedAddresses[0].fonte, 'Google API');
+assert.equal(mergedAddresses[0].fonte, 'google');
 
 const lineOnly = parseFixture('linha.kml', `<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
@@ -149,18 +149,23 @@ assert.equal(polygonWithHole.poligonos[0].quantidade_aneis, 2);
 assert.equal(JSON.parse(polygonWithHole.poligonos[0].geojson).coordinates.length, 2);
 assert.match(generateKml(polygonWithHole), /innerBoundaryIs/);
 
+const originalGeocoderChain = process.env.GEOCODER_CHAIN;
+process.env.GEOCODER_CHAIN = 'google';
+
 const noKey = await geocodeReverse(-23.551, -46.634, '');
 assert.equal(noKey.status_api, 'CONFIG_ERROR');
-assert.equal(noKey.fonte, 'Google API');
+assert.equal(noKey.fonte, 'geocoder-chain');
 assert.equal(noKey.necessita_revisao, true);
 assert.equal(noKey.quantidade_resultados, 0);
 
+process.env.GEOCODER_CHAIN = 'mock';
 const explicitMock = await geocodeReverse(-23.552, -46.635, '', 'pt-BR', 'BR', { allowMock: true });
 assert.equal(explicitMock.status_api, 'Mocked');
-assert.equal(explicitMock.fonte, 'Mock');
+assert.equal(explicitMock.fonte, 'mock');
 assert.equal(explicitMock.necessita_revisao, true);
 assert.equal(resolveGeocodeMode([explicitMock], true), 'mock');
 
+process.env.GEOCODER_CHAIN = 'google';
 const invalidCoordinate = await geocodeReverse(999, -46.636, 'valid-server-key');
 assert.equal(invalidCoordinate.status_api, 'INVALID_COORDINATE');
 assert.equal(invalidCoordinate.retryable, false);
@@ -262,6 +267,11 @@ try {
   assert.equal(denied.necessita_revisao, true);
 } finally {
   globalThis.fetch = originalFetch;
+  if (originalGeocoderChain === undefined) {
+    delete process.env.GEOCODER_CHAIN;
+  } else {
+    process.env.GEOCODER_CHAIN = originalGeocoderChain;
+  }
 }
 
 console.log('precision regression passed');

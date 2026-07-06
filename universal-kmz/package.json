@@ -10,6 +10,7 @@
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
     "test:precision": "tsx scripts/precision-regression.ts",
+    "test:providers": "tsx scripts/provider-chain-regression.ts",
     "test:upload": "tsx scripts/upload-contract-regression.ts",
     "test:export": "tsx scripts/export-contract-regression.ts",
     "test:pericial:parse": "tsx scripts/harness/pericial-parse-contract.ts",

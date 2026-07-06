@@ -6,7 +6,14 @@ import JSZip from 'jszip';
 import { createServer as createViteServer } from 'vite';
 
 import { parseKmlStringToResult } from './src/kmlParser';
-import { geocodeReverse, isOperationalGeocodeFailureStatus, isPlaceholderGoogleKey, resolveGeocodeMode } from './src/geocoder';
+import {
+  geocodeReverse,
+  getGeocoderProviderStats,
+  hasEnabledGeocoderProvider,
+  isOperationalGeocodeFailureStatus,
+  isPlaceholderGoogleKey,
+  resolveGeocodeMode
+} from './src/geocoder';
 import { generateDownloadZip, generateKml, generateWorkbook } from './src/exporters';
 import * as XLSX from 'xlsx';
 import { ParserResult, EnderecoConsulta } from './src/types';
@@ -200,6 +207,14 @@ async function startServer() {
     }
   });
 
+  app.get('/api/geocode/providers', (_req, res) => {
+    const apiKeyValue = getServerGeocodingKey();
+    const allowMock = isMockGeocoderEnabled();
+    return res.json({
+      providers: getGeocoderProviderStats(apiKeyValue, allowMock)
+    });
+  });
+
   // API Route: Bulk Geocode Reverse Coordination Set
   app.post('/api/geocode', async (req, res) => {
     try {
@@ -219,11 +234,15 @@ async function startServer() {
         });
       }
 
-      if (isPlaceholderGoogleKey(apiKeyValue) && !allowMock) {
+      if (!hasEnabledGeocoderProvider(apiKeyValue, allowMock)) {
+        const googleMissing = isPlaceholderGoogleKey(apiKeyValue);
         return res.status(503).json({
-          error: 'GOOGLE_MAPS_SERVER_KEY ausente ou placeholder. Geocodificação real não executada.',
-          code: 'GOOGLE_MAPS_SERVER_KEY_MISSING',
-          details: 'Configure uma chave server-side habilitada para Geocoding API. A chave pública do navegador não deve ser usada nesta rota.'
+          error: 'Nenhum provedor de geocodificação habilitado para a cadeia configurada.',
+          code: 'GEOCODER_PROVIDER_UNAVAILABLE',
+          details: googleMissing
+            ? 'Google sem chave válida foi pulado. Ajuste GEOCODER_CHAIN, configure chaves de provedores, ou habilite mock explicitamente.'
+            : 'Ajuste GEOCODER_CHAIN ou configure as chaves necessárias para os provedores selecionados.',
+          providers: getGeocoderProviderStats(apiKeyValue, allowMock)
         });
       }
 

@@ -2,12 +2,23 @@ import { EnderecoConsulta, PointFeature } from './types';
 
 type AddressOrigin = NonNullable<PointFeature['origem_endereco']>;
 
+const EXTERNAL_GEOCODER_SOURCES = new Set([
+  'Google API',
+  'google',
+  'nominatim',
+  'photon',
+  'locationiq',
+  'geoapify',
+  'bigdatacloud',
+  'geocoder-chain'
+]);
+
 export function resolveAddressOrigin(
   addr: EnderecoConsulta,
   fallback?: PointFeature['origem_endereco']
 ): AddressOrigin {
-  if (addr.fonte === 'Mock' || addr.status_api === 'Mocked') return 'Mocked';
-  if (addr.fonte === 'Google API') return 'Geocoding API';
+  if (addr.fonte === 'Mock' || addr.fonte === 'mock' || addr.status_api === 'Mocked') return 'Mocked';
+  if (EXTERNAL_GEOCODER_SOURCES.has(addr.fonte)) return 'Geocoding API';
   if (addr.fonte === 'Original') return 'Original';
   if (addr.fonte === 'Manual') return 'Manual';
   return fallback || 'Geocoding API';
