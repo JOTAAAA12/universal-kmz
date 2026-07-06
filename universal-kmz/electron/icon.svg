@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-label="Universal KMZ">
+  <rect width="256" height="256" rx="48" fill="#0f172a"/>
+  <path d="M54 178V78l50 24 48-24 50 24v100l-50-24-48 24-50-24Z" fill="#e2e8f0"/>
+  <path d="M104 102v100M152 78v100" stroke="#0f766e" stroke-width="12" stroke-linecap="round"/>
+  <circle cx="128" cy="126" r="30" fill="#14b8a6"/>
+  <path d="M128 94c19 0 34 15 34 34 0 24-34 58-34 58s-34-34-34-58c0-19 15-34 34-34Zm0 20a14 14 0 1 0 0 28 14 14 0 0 0 0-28Z" fill="#ffffff"/>
+</svg>

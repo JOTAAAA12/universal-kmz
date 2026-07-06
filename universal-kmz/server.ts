@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import express from 'express';
+import fs from 'node:fs';
 import path from 'path';
 import * as crypto from 'crypto';
 import JSZip from 'jszip';
@@ -43,6 +44,16 @@ function isMockGeocoderEnabled() {
   const mode = (process.env.GEOCODER_MODE || '').trim().toLowerCase();
   const allowMock = (process.env.ALLOW_MOCK_GEOCODER || '').trim().toLowerCase();
   return mode === 'mock' || allowMock === 'true' || allowMock === '1';
+}
+
+function resolveClientDistPath() {
+  const candidates = [
+    path.resolve(__dirname),
+    path.resolve(process.cwd(), 'dist'),
+    path.resolve(process.cwd())
+  ];
+  const found = candidates.find(candidate => fs.existsSync(path.join(candidate, 'index.html')));
+  return found || candidates[0];
 }
 
 function getServerGeocodingKey() {
@@ -855,7 +866,7 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), 'dist');
+    const distPath = resolveClientDistPath();
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));

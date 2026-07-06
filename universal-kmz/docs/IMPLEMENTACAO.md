@@ -171,3 +171,20 @@ Validacao esperada da Fase 8B:
 - `npm.cmd run test:cnefedl`
 - `npm.cmd run lint`
 - `npm.cmd run build`
+
+## Fase 8C - Shell Electron e instalador Windows
+
+- Criada pasta `electron/` com `main.cjs`, `preload.cjs` e icone placeholder.
+- O shell Electron resolve `app.getPath('userData')` antes de subir o backend e define `GEOCODE_CACHE_DIR=%APPDATA%\Universal KMZ` e `CNEFE_DIR=%APPDATA%\Universal KMZ\cnefe`.
+- O backend Express empacotado sobe como processo filho a partir de `dist/server.cjs`, com `PORT` escolhido entre `3000..3010` e polling em `127.0.0.1` antes de abrir a janela.
+- A janela principal usa `1280x860`, `contextIsolation=true`, `nodeIntegration=false`, preload minimo e menu com recarregar, DevTools em desenvolvimento e sair.
+- `server.ts` passou a resolver os assets estaticos de producao por caminho absoluto, priorizando o diretorio do bundle (`dist/`) e mantendo fallback para `process.cwd()/dist`.
+- `package.json` recebeu `electron`, `electron-builder`, scripts `electron:dev` e `dist`, versao `1.0.0` e configuracao de build Windows com saida em `release/`, alvos `nsis` e `portable`, `asar=true` e exclusao explicita de `dados/**`.
+- Criado `docs/EMPACOTAMENTO.md` com fluxo de build, local dos artefatos, alerta de SmartScreen sem assinatura e pasta de dados do usuario.
+
+Validacao esperada da Fase 8C:
+
+- `npm.cmd install` para atualizar `package-lock.json` com as dependencias deliberadas.
+- `npm.cmd run lint`
+- `npm.cmd run build`
+- `npm.cmd run dist` no host Windows do orquestrador para produzir e validar os instaladores em `release/`.

@@ -5,3 +5,4 @@ dist/
 *.zip
 graphify-out/
 universal-kmz/dados/
+universal-kmz/release/
