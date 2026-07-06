@@ -4,3 +4,4 @@ dist/
 .env.local
 *.zip
 graphify-out/
+universal-kmz/dados/
