@@ -1,17 +1,15 @@
 import React, { useState } from 'react';
 import { 
-  Menu, Search, Filter, RefreshCw, AlertCircle, Edit, ArrowUpDown, Check, X, CheckSquare
+  Search, RefreshCw, Edit, Check, X
 } from 'lucide-react';
 import {
   ParserResult,
-  KmlFeature,
   PointFeature,
-  TrechoFeature,
-  PoligonoFeature,
-  EnderecoConsulta,
-  TrechoEndereco,
-  EnderecoPoligono
+  EnderecoConsulta
 } from '../types';
+import SourceBadge from './SourceBadge';
+import TrechosTable from './TrechosTable';
+import PoligonosTable from './PoligonosTable';
 
 interface TabelaViewProps {
   result: ParserResult;
@@ -129,43 +127,12 @@ function getPointStatus(p: PointFeature): ResolutionBadge {
   }
 }
 
-function getTrechoStatus(result: ParserResult, t: TrechoFeature): ResolutionBadge {
-  if (t.conflito_endereco) {
-    return {
-      status: 'PARCIAL',
-      label: 'Conflito / Revisar',
-      color: 'bg-amber-50 text-amber-700 border border-amber-200'
-    };
-  }
-
-  const startStatus = getAddressStatusForCoords(result, t.inicio_lat, t.inicio_lng, t.inicio_endereco);
-  const endStatus = getAddressStatusForCoords(result, t.fim_lat, t.fim_lng, t.fim_endereco);
-
-  if (startStatus.status === 'FALHA' || endStatus.status === 'FALHA') {
-    return {
-      status: 'FALHA',
-      label: 'Falha / Pendente',
-      color: 'bg-rose-50 text-rose-700 border border-rose-200'
-    };
-  }
-
-  if (startStatus.status === 'PARCIAL' || endStatus.status === 'PARCIAL') {
-    return {
-      status: 'PARCIAL',
-      label: 'Parcial',
-      color: 'bg-amber-50 text-amber-700 border border-amber-200'
-    };
-  }
-
-  return {
-    status: 'SUCESSO',
-    label: 'Sucesso (Completo)',
-    color: 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-  };
-}
-
 function coordinateKey(lat: number, lng: number): string {
   return `${lat.toFixed(5)},${lng.toFixed(5)}`;
+}
+
+function getAddressRecordForCoords(result: ParserResult, lat: number, lng: number): EnderecoConsulta | undefined {
+  return result.enderecos.find(e => Math.abs(e.latitude - lat) < 0.0001 && Math.abs(e.longitude - lng) < 0.0001);
 }
 
 function recalculateAddressSummary(result: ParserResult): ParserResult {
@@ -219,29 +186,6 @@ function upsertManualPointAddress(result: ParserResult, point: PointFeature): Pa
   };
 }
 
-function getLineAddressSegments(result: ParserResult, linhaId: string): TrechoEndereco[] {
-  return (result.trechos_endereco || []).filter(item => item.linha_id === linhaId);
-}
-
-function getPolygonAddress(result: ParserResult, poligonoId: string): EnderecoPoligono | undefined {
-  return (result.enderecos_poligono || []).find(item => item.poligono_id === poligonoId);
-}
-
-function formatNumberRange(segment: TrechoEndereco): string {
-  if (segment.numero_inicio === undefined && segment.numero_fim === undefined) return '';
-  if (segment.numero_inicio === segment.numero_fim || segment.numero_fim === undefined) {
-    return ` (nº ${segment.numero_inicio})`;
-  }
-  if (segment.numero_inicio === undefined) {
-    return ` (nº ${segment.numero_fim})`;
-  }
-  return ` (nº ${segment.numero_inicio}-${segment.numero_fim})`;
-}
-
-function formatTrechoEndereco(segment: TrechoEndereco): string {
-  return `${segment.logradouro}${formatNumberRange(segment)}, ${segment.extensao_m.toFixed(0)} m`;
-}
-
 export default function TabelaView({
   result,
   onUpdateResult,
@@ -272,8 +216,9 @@ export default function TabelaView({
     t.caminho_pasta.toLowerCase().includes(searchTerm.toLowerCase()) ||
     (t.inicio_endereco || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
     (t.fim_endereco || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
-    getLineAddressSegments(result, t.trecho_id)
-      .map(formatTrechoEndereco)
+    (result.trechos_endereco || [])
+      .filter(item => item.linha_id === t.trecho_id)
+      .map(item => item.logradouro)
       .join(' ')
       .toLowerCase()
       .includes(searchTerm.toLowerCase())
@@ -282,8 +227,8 @@ export default function TabelaView({
   const filteredPoligonas = result.poligonos.filter(pl => 
     pl.nome_original.toLowerCase().includes(searchTerm.toLowerCase()) ||
     pl.caminho_pasta.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    (getPolygonAddress(result, pl.poligono_id)?.logradouro || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
-    (getPolygonAddress(result, pl.poligono_id)?.confrontantes || []).join(' ').toLowerCase().includes(searchTerm.toLowerCase())
+    ((result.enderecos_poligono || []).find(item => item.poligono_id === pl.poligono_id)?.logradouro || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+    ((result.enderecos_poligono || []).find(item => item.poligono_id === pl.poligono_id)?.confrontantes || []).join(' ').toLowerCase().includes(searchTerm.toLowerCase())
   );
 
   const filteredEnderecos = result.enderecos.filter(e => 
@@ -587,6 +532,7 @@ export default function TabelaView({
                     ) : (
                       <div className="flex flex-col gap-1">
                         <span className="font-semibold text-slate-700 text-xs block leading-tight">{p.endereco_formatado || 'Desconhecido/Pendente'}</span>
+                        <SourceBadge source={getAddressRecordForCoords(result, p.latitude, p.longitude)?.fonte || p.origem_endereco} />
                         {p.conflito_endereco && (
                           <span className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-1 leading-snug">
                             {p.conflito_endereco}
@@ -681,230 +627,26 @@ export default function TabelaView({
           </table>
         )}
 
-        {/* Trechos sheet */}
         {activeTab === 'trechos' && (
-          <table className="w-full text-left border-collapse text-xs animate-fade-in" id="trechos-grid-panel">
-            <thead>
-              <tr className="bg-slate-50 text-slate-500 font-semibold border-b border-slate-100">
-                <th className="p-3">ID Trecho</th>
-                <th className="p-3">Nome</th>
-                <th className="p-3 text-right">Compr. Declarado</th>
-                <th className="p-3 text-right">Compr. Medido</th>
-                <th className="p-3">Início (Endereço)</th>
-                <th className="p-3">Fim (Endereço)</th>
-                <th className="p-3">Trechos Endereçados</th>
-                <th className="p-3 text-center">Inversão Direção</th>
-                <th className="p-3 text-center">Resolução</th>
-                <th className="p-3 font-semibold">Status</th>
-                <th className="p-3 text-right">Ação</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-50">
-              {filteredTrechos.map(t => (
-                <tr key={t.trecho_id} className="hover:bg-slate-50/50">
-                  <td className="p-3 font-mono font-semibold text-indigo-600">{t.trecho_id}</td>
-                  <td className="p-3">
-                    {editingId === t.trecho_id ? (
-                      <input
-                        type="text"
-                        value={editFields.nome}
-                        onChange={(e) => setEditFields({ ...editFields, nome: e.target.value })}
-                        className="p-1 border border-slate-200 rounded w-full text-xs"
-                      />
-                    ) : (
-                      <span className="font-semibold text-slate-700">{t.nome_original}</span>
-                    )}
-                  </td>
-                  <td className="p-3 text-right text-slate-400 font-mono font-medium">
-                    {t.comprimento_declarado_m > 0 ? `${t.comprimento_declarado_m}m` : 'N/A'}
-                  </td>
-                  <td className="p-3 text-right font-mono font-semibold text-slate-800">
-                    {t.comprimento_calculado_m.toFixed(1)}m
-                  </td>
-                  <td className="p-3 max-w-xs truncate text-slate-500" title={t.inicio_endereco}>
-                    C: <span className="font-mono text-[10px]/none inline-block">({t.inicio_lat.toFixed(4)}, {t.inicio_lng.toFixed(4)})</span>
-                    <br />
-                    E: <span className="font-medium text-slate-700">{t.inicio_endereco || 'Não geocodificado'}</span>
-                  </td>
-                  <td className="p-3 max-w-xs truncate text-slate-500" title={t.fim_endereco}>
-                    C: <span className="font-mono text-[10px]/none inline-block">({t.fim_lat.toFixed(4)}, {t.fim_lng.toFixed(4)})</span>
-                    <br />
-                    E: <span className="font-medium text-slate-700">{t.fim_endereco || 'Não geocodificado'}</span>
-                    {t.conflito_endereco && (
-                      <span className="block mt-1 text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-1 leading-snug whitespace-normal">
-                        {t.conflito_endereco}
-                      </span>
-                    )}
-                  </td>
-                  <td className="p-3 min-w-[240px] max-w-sm">
-                    {(() => {
-                      const segments = getLineAddressSegments(result, t.trecho_id);
-                      if (segments.length === 0) {
-                        return <span className="text-slate-400 italic">Não processado</span>;
-                      }
-                      return (
-                        <div className="flex flex-col gap-1">
-                          {segments.map(segment => (
-                            <span
-                              key={`${t.trecho_id}-${segment.ordem || segment.logradouro}`}
-                              className={`text-[10px] leading-snug rounded border px-2 py-1 ${
-                                segment.necessita_revisao
-                                  ? 'bg-amber-50 text-amber-800 border-amber-200'
-                                  : 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                              }`}
-                            >
-                              {formatTrechoEndereco(segment)}
-                            </span>
-                          ))}
-                        </div>
-                      );
-                    })()}
-                  </td>
-                  <td className="p-3 text-center">
-                    <button
-                      onClick={() => handleInvertTrecho(t.trecho_id)}
-                      className="px-2 py-1 bg-amber-50 hover:bg-amber-100 text-amber-600 border border-amber-200 hover:border-amber-300 rounded font-bold text-[10px] cursor-pointer transition select-none flex items-center gap-1 mx-auto"
-                      title="Clique para inverter e recalcular início/fim"
-                    >
-                      <ArrowUpDown className="h-3 w-3" /> Inverter
-                    </button>
-                  </td>
-                  <td className="p-3 text-center">
-                    {(() => {
-                      const badge = getTrechoStatus(result, t);
-                      return (
-                        <span className={`px-2 py-0.5 rounded-full font-bold text-[10px] border ${badge.color}`}>
-                          {badge.label}
-                        </span>
-                      );
-                    })()}
-                  </td>
-                  <td className="p-3">
-                    <span className={`px-2 py-0.5 rounded font-semibold text-[10px] ${
-                      t.alerta_comprimento ? 'bg-rose-50 text-rose-600' : 'bg-slate-100 text-slate-600'
-                    }`}>
-                      {t.status}
-                    </span>
-                  </td>
-                  <td className="p-3 text-right">
-                    {editingId === t.trecho_id ? (
-                      <div className="flex justify-end gap-1">
-                        <button onClick={() => handleSaveEdit('trechos', t.trecho_id)} className="bg-indigo-50 hover:bg-indigo-100 text-indigo-600 p-1 rounded">
-                          <Check className="h-3.5 w-3.5" />
-                        </button>
-                        <button onClick={() => setEditingId(null)} className="bg-rose-50 hover:bg-rose-100 text-rose-600 p-1 rounded">
-                          <X className="h-3.5 w-3.5" />
-                        </button>
-                      </div>
-                    ) : (
-                      <button
-                        onClick={() => handleStartEdit(t.trecho_id, { nome: t.nome_original, obs: t.observacoes })}
-                        className="text-slate-400 hover:text-indigo-600 p-1 transition rounded hover:bg-slate-100"
-                      >
-                        <Edit className="h-3.5 w-3.5" />
-                      </button>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <TrechosTable
+            result={result}
+            trechos={filteredTrechos}
+            editingId={editingId}
+            editFields={editFields}
+            setEditFields={setEditFields}
+            setEditingId={setEditingId}
+            onStartEdit={handleStartEdit}
+            onSaveEdit={(id) => handleSaveEdit('trechos', id)}
+            onInvertTrecho={handleInvertTrecho}
+          />
         )}
 
-        {/* Polygons sheet */}
         {activeTab === 'poligonos' && (
-          <table className="w-full text-left border-collapse text-xs">
-            <thead>
-              <tr className="bg-slate-50 text-slate-500 font-semibold border-b border-slate-100">
-                <th className="p-3">ID Polígono</th>
-                <th className="p-3">Nome KML</th>
-                <th className="p-3 text-right">Área Estimada (m²)</th>
-                <th className="p-3 text-right">Perímetro (m)</th>
-                <th className="p-3">Centroid (Lat, Lng)</th>
-                <th className="p-3">Endereço Centroid</th>
-                <th className="p-3">Dominante / Confrontantes</th>
-                <th className="p-3 text-center">Resolução</th>
-                <th className="p-3 text-center">Status</th>
-                <th className="p-3 text-right">Ação</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-50">
-              {filteredPoligonas.map(pl => (
-                <tr key={pl.poligono_id} className="hover:bg-slate-50/50">
-                  <td className="p-3 font-mono font-semibold text-slate-700">{pl.poligono_id}</td>
-                  <td className="p-3 font-semibold text-slate-700">{pl.nome_original}</td>
-                  <td className="p-3 text-right font-mono text-slate-800 font-medium">
-                    {pl.area_m2.toFixed(1)}m²
-                  </td>
-                  <td className="p-3 text-right font-mono text-slate-500">
-                    {pl.perimetro_m.toFixed(1)}m
-                  </td>
-                  <td className="p-3 font-mono text-slate-500">
-                    ({pl.centroid_lat.toFixed(5)}, {pl.centroid_lng.toFixed(5)})
-                  </td>
-                  <td className="p-3 text-slate-600 max-w-xs">
-                    <span className="block truncate">{pl.centroid_endereco || 'Não geocodificado'}</span>
-                    {pl.conflito_endereco && (
-                      <span className="block mt-1 text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-1 leading-snug">
-                        {pl.conflito_endereco}
-                      </span>
-                    )}
-                  </td>
-                  <td className="p-3 min-w-[220px] max-w-sm">
-                    {(() => {
-                      const endereco = getPolygonAddress(result, pl.poligono_id);
-                      if (!endereco) {
-                        return <span className="text-slate-400 italic">Não processado</span>;
-                      }
-                      return (
-                        <div className="space-y-1">
-                          <span className={`block text-[10px] rounded border px-2 py-1 font-semibold ${
-                            endereco.necessita_revisao
-                              ? 'bg-amber-50 text-amber-800 border-amber-200'
-                              : 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                          }`}>
-                            {endereco.logradouro}{endereco.municipio ? `, ${endereco.municipio}` : ''}
-                          </span>
-                          {endereco.confrontantes.length > 0 && (
-                            <span className="block text-[10px] text-slate-600 bg-slate-50 border border-slate-200 rounded px-2 py-1">
-                              Confrontantes: {endereco.confrontantes.join(' | ')}
-                            </span>
-                          )}
-                        </div>
-                      );
-                    })()}
-                  </td>
-                  <td className="p-3 text-center">
-                    {(() => {
-                      const badge = pl.conflito_endereco
-                        ? { label: 'Conflito / Revisar', color: 'bg-amber-50 text-amber-700 border border-amber-200' }
-                        : getAddressStatusForCoords(result, pl.centroid_lat, pl.centroid_lng, pl.centroid_endereco);
-                      return (
-                        <span className={`px-2 py-0.5 rounded-full font-bold text-[10px] border ${badge.color}`}>
-                          {badge.label}
-                        </span>
-                      );
-                    })()}
-                  </td>
-                  <td className="p-3 text-center">
-                    <span className={`px-2 py-0.5 rounded font-bold text-[10px] ${
-                      pl.valido ? 'bg-emerald-50 text-emerald-600' : 'bg-rose-50 text-rose-600'
-                    }`}>
-                      {pl.valido ? 'Válido' : 'Inválido'}
-                    </span>
-                  </td>
-                  <td className="p-3 text-right">
-                    <button
-                      onClick={() => handleStartEdit(pl.poligono_id, { nome: pl.nome_original, obs: pl.observacoes })}
-                      className="text-slate-400 hover:text-indigo-600 p-1 transition rounded hover:bg-slate-100"
-                    >
-                      <Edit className="h-3.5 w-3.5" />
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <PoligonosTable
+            result={result}
+            poligonos={filteredPoligonas}
+            onStartEdit={handleStartEdit}
+          />
         )}
 
         {/* Addresses sheets */}
@@ -936,9 +678,7 @@ export default function TabelaView({
                   <td className="p-3 text-slate-700">{e.municipio ? `${e.municipio} - ${e.uf || ''}` : 'N/A'}</td>
                   <td className="p-3 font-mono text-slate-500">{e.cep || 'N/A'}</td>
                   <td className="p-3">
-                    <span className="bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded font-bold text-[9px]">
-                      {e.fonte}
-                    </span>
+                    <SourceBadge source={e.fonte} />
                   </td>
                   <td className="p-3 font-bold text-slate-500">{e.cache_hit ? 'SIM' : 'NÃO'}</td>
                   <td className="p-3 text-center">

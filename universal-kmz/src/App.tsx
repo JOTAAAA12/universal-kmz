@@ -1,16 +1,12 @@
 import React, { useState, useRef } from 'react';
 import { 
-  Upload, LayoutDashboard, Map as MapIcon, TableProperties, Download, 
-  Settings, RefreshCw, AlertTriangle, Play, Pause, Square, Plus, Trash2, 
-  HelpCircle, Eye, LogOut, CheckCircle, BrainCircuit
+  LayoutDashboard, Map as MapIcon, TableProperties, Download, Play, Pause, Square
 } from 'lucide-react';
 
 import {
   ParserResult,
   Coordinate,
   EnderecoConsulta,
-  PointFeature,
-  TrechoFeature,
   AuditoriaLog,
   EnderecoPoligono,
   TrechoEndereco
@@ -20,6 +16,8 @@ import SummaryView from './components/SummaryView';
 import TabelaView from './components/TabelaView';
 import DownloadView from './components/DownloadView';
 import MapView from './components/MapView';
+import ProviderStatus from './components/ProviderStatus';
+import { AppFooter, AppHeader } from './components/AppChrome';
 import {
   buildExistingAddressConflict,
   mergeExternalAddressRecord,
@@ -556,43 +554,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-100 flex flex-col font-sans" id="application-root">
-      
-      {/* Universal Top Bar Header */}
-      <header className="h-16 border-b border-slate-300 bg-white flex items-center justify-between px-6 shrink-0 sticky top-0 z-50">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 bg-indigo-600 flex items-center justify-center text-white font-bold rounded text-sm font-mono tracking-tight shadow-sm">
-            KM
-          </div>
-          <div>
-            <h1 className="text-sm md:text-base font-bold tracking-tight uppercase leading-none text-slate-900">
-              Universal Geocoder <span className="text-slate-400 font-light italic text-xs capitalize">KML / KMZ</span>
-            </h1>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-4 text-xs">
-          {/* Status Indicator */}
-          <div className="flex items-center gap-2 px-3 py-1 bg-green-50 text-green-700 border border-green-200 rounded-full font-medium">
-            <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
-            <span>Connected (pt-BR)</span>
-          </div>
-
-          {result && (
-            <div className="flex items-center gap-2">
-              <span className="px-3 py-1 bg-slate-100 text-slate-700 font-bold border border-slate-200 rounded text-[11px] font-mono">
-                {originalFile?.name}
-              </span>
-              <button
-                onClick={handleResetWorkspace}
-                className="text-[10px] font-bold text-rose-600 bg-rose-50 hover:bg-rose-100 border border-rose-200 px-3 py-1 rounded cursor-pointer transition uppercase tracking-wider"
-                id="reset-workspace-btn"
-              >
-                Novo
-              </button>
-            </div>
-          )}
-        </div>
-      </header>
+      <AppHeader fileName={result ? originalFile?.name : undefined} onReset={handleResetWorkspace} />
 
       {/* Main app body screen router */}
       <main className="flex-1 flex flex-col overflow-hidden">
@@ -701,6 +663,8 @@ export default function App() {
               </div>
             </div>
 
+            <ProviderStatus />
+
             {/* Middle Nav Tab list */}
             <div className="flex border border-slate-300 bg-white rounded overflow-hidden" id="workspace-tabs-navigator">
               <button
@@ -793,20 +757,14 @@ export default function App() {
               toleranceMatch={toleranceMatch}
               setToleranceMatch={setToleranceMatch}
             />
+            <div className="max-w-4xl mx-auto px-4 md:px-8 pb-8">
+              <ProviderStatus />
+            </div>
           </div>
         )}
       </main>
 
-      {/* Structured technical footer */}
-      <footer className="h-12 border-t border-slate-300 bg-white flex items-center justify-between px-6 shrink-0 text-[10px] text-slate-400 font-mono">
-        <div className="flex items-center gap-4">
-          <span className="flex items-center gap-1.5"><div className="w-2 h-2 rounded-full bg-slate-300"></div> Port: 3000 Ingress</span>
-          <span className="flex items-center gap-1.5"><div className="w-2 h-2 rounded-full bg-indigo-500"></div> UTF-8 Brazilian Compliant</span>
-        </div>
-        <div>
-          Universal KMZ Reader & Geocoder &bull; MVP
-        </div>
-      </footer>
+      <AppFooter />
     </div>
   );
 }
