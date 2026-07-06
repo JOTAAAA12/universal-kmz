@@ -221,15 +221,15 @@ async function startServer() {
   };
 
   const startCnefeIndexInBackground = () => {
-    updateCnefeProviderState(null, 'carregando', 'Indexação CNEFE em andamento.');
+    updateCnefeProviderState(null, 'carregando', 'Carregamento do índice CNEFE em andamento.');
     void loadCnefeIndex({
-      onProgress: stats => updateCnefeProviderState(stats, 'carregando', 'Indexação CNEFE em andamento.')
+      onProgress: stats => updateCnefeProviderState(stats, 'carregando', 'Carregamento do índice CNEFE em andamento.')
     }).then(index => {
       setCnefeIndex(index);
       updateCnefeProviderState(
         index.stats,
         index.stats.indexedRows > 0 ? 'pronto' : 'ausente',
-        index.stats.indexedRows > 0 ? 'Índice CNEFE pronto.' : 'Nenhum CSV CNEFE carregado.'
+        index.stats.indexedRows > 0 ? 'Índice CNEFE SQLite pronto.' : 'Nenhum CSV CNEFE carregado.'
       );
     }).catch((err: any) => {
       const message = err?.message || 'Falha ao indexar CNEFE.';

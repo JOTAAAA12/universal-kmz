@@ -133,3 +133,28 @@ Validacao esperada da Fase 7:
 - `npm.cmd run test:upload`
 - `npm.cmd run lint`
 - `npm.cmd run build`
+
+## Fase 8A - Índice CNEFE SQLite em disco
+
+- `src/cnefeIndex.ts` deixou de manter a grade CNEFE inteira em RAM e passou a persistir `cnefe-index.sqlite` dentro de `CNEFE_DIR`.
+- O banco usa `node:sqlite`, tabela `enderecos`, células `cell_lat`/`cell_lng`, índice composto por célula e metadados por CSV na tabela `meta`.
+- No boot, CSVs com mesmo caminho, tamanho e `mtime` são reaproveitados sem reindexação; CSV novo/alterado é ingerido por append após limpeza da fonte antiga; CSV removido apaga suas linhas do banco.
+- `lookupNearest` consulta somente as células candidatas no SQLite e calcula a distância final em JS com `getDistanceMeters`, preservando o cutoff padrão de 150 m e o contrato do provider CNEFE.
+- A ingestão continua emitindo `onProgress` com `indexedRows` crescente para o painel de carregamento; reabertura sem ingestão reporta as linhas já persistidas.
+- `CNEFE_MAX_ROWS` permanece como teto opcional de segurança para ingestão, mas o fluxo normal não precisa mais de heap gigante nem de reindexação a cada boot.
+- O script `dev` não usa mais `--max-old-space-size=12288`.
+- `scripts/cnefe-regression.ts` foi refeito para fixture temporária SQLite: ingestão, lookup, cutoff, resolução IBGE Campinas/SP, reabertura sem reprocessar e remoção de CSV ausente.
+
+Validacao esperada da Fase 8A:
+
+- `npm.cmd run test:cnefe`
+- `npm.cmd run test:precision`
+- `npm.cmd run test:providers`
+- `npm.cmd run test:cache`
+- `npm.cmd run test:trechos`
+- `npm.cmd run test:upload`
+- `npm.cmd run test:export`
+- `npm.cmd run test:config`
+- `npm.cmd run test:pericial`
+- `npm.cmd run lint`
+- `npm.cmd run build`
