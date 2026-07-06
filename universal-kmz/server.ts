@@ -14,8 +14,11 @@ import {
   isPlaceholderGoogleKey,
   resolveGeocodeMode
 } from './src/geocoder';
+import { loadCnefeIndex } from './src/cnefeIndex';
 import { createPersistentGeocodeCache, registerGeocodeCacheShutdown } from './src/geocodeCache';
 import { GeocodeJobManager, geocodeCoordinateBatch } from './src/geocodeJobs';
+import { setCnefeIndex } from './src/providers/cnefe';
+import { validateCep } from './src/providers/viacep';
 import {
   consolidateSegments,
   resolveDominantPolygonAddress,
@@ -69,6 +72,32 @@ function buildProcessingParams(input: any) {
     `Modo Geocode: ${typeof input?.geocodeMode === 'string' ? input.geocodeMode : 'COMPLETO'}`
   ];
   return parts.join(', ');
+}
+
+function isViaCepValidationEnabled() {
+  const value = (process.env.VIACEP_VALIDATION || '').trim().toLowerCase();
+  return value === 'true' || value === '1' || value === 'yes';
+}
+
+function appendValidationNote(item: EnderecoConsulta, note: string): EnderecoConsulta {
+  return {
+    ...item,
+    observacao_validacao: [item.observacao_validacao, note].filter(Boolean).join(' | ')
+  };
+}
+
+async function validateAddressWithViaCep(item: EnderecoConsulta): Promise<EnderecoConsulta> {
+  if (!isViaCepValidationEnabled() || item.status_api !== 'SUCESSO' || !item.cep) {
+    return item;
+  }
+  const validation = await validateCep(item.cep, item.logradouro, item.municipio, item.uf);
+  if (validation.ok || validation.skipped) {
+    return item;
+  }
+  return appendValidationNote({
+    ...item,
+    necessita_revisao: true
+  }, validation.message || 'ViaCEP indicou divergência de município/UF.');
 }
 
 function mergeParserResults(results: ParserResult[], fileName: string, fileHash: string): ParserResult {
@@ -152,6 +181,7 @@ async function startServer() {
   const geocodeCache = createPersistentGeocodeCache();
   await geocodeCache.load();
   registerGeocodeCacheShutdown(geocodeCache);
+  setCnefeIndex(await loadCnefeIndex());
   const geocodeJobs = new GeocodeJobManager();
 
   // Set body parser margins to 50MB as requested by user instructions
@@ -238,16 +268,16 @@ async function startServer() {
     });
   });
 
-  const buildGeocodeOperation = (apiKeyValue: string, allowMock: boolean, language: string, region: string) => (
+  const buildGeocodeOperation = (apiKeyValue: string, allowMock: boolean, language: string, region: string) => async (
     coord: Coordinate
-  ) => geocodeReverse(
+  ) => validateAddressWithViaCep(await geocodeReverse(
     coord.lat,
     coord.lng,
     apiKeyValue,
     language,
     region,
     { allowMock, cache: geocodeCache }
-  );
+  ));
 
   const buildGeocodeErrors = (results: EnderecoConsulta[]) => results
     .filter(item => isOperationalGeocodeFailureStatus(item.status_api))

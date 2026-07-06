@@ -11,6 +11,7 @@
     "lint": "tsc --noEmit",
     "test:precision": "tsx scripts/precision-regression.ts",
     "test:providers": "tsx scripts/provider-chain-regression.ts",
+    "test:cnefe": "tsx scripts/cnefe-regression.ts",
     "test:cache": "tsx scripts/cache-and-jobs-regression.ts",
     "test:trechos": "tsx scripts/trechos-regression.ts",
     "test:upload": "tsx scripts/upload-contract-regression.ts",

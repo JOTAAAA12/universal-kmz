@@ -25,6 +25,7 @@ export interface GeocodeProvider {
   name: GeocoderProviderName;
   isEnabled: (request: GeocodeProviderRequest) => boolean;
   reverse: (request: GeocodeProviderRequest) => Promise<EnderecoConsulta>;
+  getStatus?: () => Partial<GeocoderProviderStatus>;
 }
 
 export interface GeocoderProviderStatus {
@@ -33,6 +34,9 @@ export interface GeocoderProviderStatus {
   usados_na_sessao: number;
   cooldown_ativo: boolean;
   cooldown_ate?: string;
+  linhas_indexadas?: number;
+  indice_parcial?: boolean;
+  mensagens?: string[];
 }
 
 export interface JsonFetchResult {
@@ -91,7 +95,8 @@ export function buildGeocodeRecord(
     place_id: fields.place_id,
     plus_code: fields.plus_code,
     tipos: fields.tipos,
-    granularidade: fields.granularidade
+    granularidade: fields.granularidade,
+    observacao_validacao: fields.observacao_validacao
   };
 }
 

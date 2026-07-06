@@ -17,10 +17,15 @@ services:
       LOCATIONIQ_API_KEY: ${LOCATIONIQ_API_KEY:-}
       GEOAPIFY_API_KEY: ${GEOAPIFY_API_KEY:-}
       NOMINATIM_EMAIL: ${NOMINATIM_EMAIL:-}
+      CNEFE_DIR: ${CNEFE_DIR:-/app/dados/cnefe}
+      VIACEP_VALIDATION: ${VIACEP_VALIDATION:-false}
+      GEOCODE_CROSSCHECK: ${GEOCODE_CROSSCHECK:-false}
       GOOGLE_MAPS_BROWSER_KEY: ${GOOGLE_MAPS_BROWSER_KEY:-}
       GOOGLE_MAPS_MAP_ID: ${GOOGLE_MAPS_MAP_ID:-}
     ports:
       - "${KMZ_HOST_PORT:-3008}:3000"
+    volumes:
+      - ./dados:/app/dados
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]

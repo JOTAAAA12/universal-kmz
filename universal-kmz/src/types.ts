@@ -173,6 +173,7 @@ export interface EnderecoConsulta {
   provider_error_message?: string;
   http_status?: number;
   retryable?: boolean;
+  observacao_validacao?: string;
   quantidade_resultados: number;
   fonte: string; // "Google API" or "Mock" or "Manual"
   cache_hit: boolean;

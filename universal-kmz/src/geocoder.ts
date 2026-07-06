@@ -1,6 +1,7 @@
 import { EnderecoConsulta } from './types';
 import { getDistanceMeters } from './kmlParser';
 import { bigDataCloudProvider } from './providers/bigdatacloud';
+import { cnefeProvider } from './providers/cnefe';
 import { geoapifyProvider } from './providers/geoapify';
 import { googleProvider } from './providers/google';
 import { locationIqProvider } from './providers/locationiq';
@@ -58,6 +59,7 @@ const OPERATIONAL_FAILURE_STATUSES = new Set([
 ]);
 
 const BUILT_IN_PROVIDERS: Record<string, GeocodeProvider> = {
+  cnefe: cnefeProvider,
   google: googleProvider,
   nominatim: nominatimProvider,
   photon: photonProvider,
@@ -209,6 +211,103 @@ function incrementUsage(providerName: string) {
   providerUsage.set(providerName, (providerUsage.get(providerName) || 0) + 1);
 }
 
+function envFlag(env: NodeJS.ProcessEnv, key: string): boolean {
+  const value = (env[key] || '').trim().toLowerCase();
+  return value === 'true' || value === '1' || value === 'yes';
+}
+
+function normalizeComparable(value?: string): string {
+  return (value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function appendValidationNote(item: EnderecoConsulta, note: string): EnderecoConsulta {
+  return {
+    ...item,
+    observacao_validacao: [item.observacao_validacao, note].filter(Boolean).join(' | ')
+  };
+}
+
+function isZeroResult(item: EnderecoConsulta): boolean {
+  return item.status_api === 'ZERO_RESULTS' || item.status_api === 'ZERO_RESULTADOS';
+}
+
+function isSuccessResult(item: EnderecoConsulta): boolean {
+  return item.status_api === 'SUCESSO' || isMockResult(item);
+}
+
+function shouldCrossCheck(item: EnderecoConsulta, env: NodeJS.ProcessEnv): boolean {
+  return envFlag(env, 'GEOCODE_CROSSCHECK') && isSuccessResult(item) && (!item.numero || item.necessita_revisao);
+}
+
+function providersAgree(primary: EnderecoConsulta, secondary: EnderecoConsulta): boolean {
+  const primaryStreet = normalizeComparable(primary.logradouro);
+  const secondaryStreet = normalizeComparable(secondary.logradouro);
+  const primaryCity = normalizeComparable(primary.municipio);
+  const secondaryCity = normalizeComparable(secondary.municipio);
+  return Boolean(primaryStreet && secondaryStreet && primaryCity && secondaryCity
+    && primaryStreet === secondaryStreet
+    && primaryCity === secondaryCity);
+}
+
+async function maybeCrossCheckResult(
+  result: EnderecoConsulta,
+  providers: GeocodeProvider[],
+  providerIndex: number,
+  request: GeocodeProviderRequest
+): Promise<EnderecoConsulta> {
+  if (!shouldCrossCheck(result, request.env)) {
+    return result;
+  }
+
+  for (let index = providerIndex + 1; index < providers.length; index++) {
+    const provider = providers[index];
+    if (!provider.isEnabled(request) || isCoolingDown(provider.name)) {
+      continue;
+    }
+    incrementUsage(provider.name);
+    const comparison = await provider.reverse(request);
+    if (isRetryableProviderResult(comparison)) {
+      markCooldown(provider.name);
+    }
+    if (!isSuccessResult(comparison)) {
+      return result;
+    }
+    if (providersAgree(result, comparison)) {
+      return {
+        ...result,
+        necessita_revisao: false
+      };
+    }
+    return appendValidationNote({
+      ...result,
+      necessita_revisao: true
+    }, `Cross-check diverge de ${comparison.fonte}: ${comparison.logradouro || 'sem logradouro'} / ${comparison.municipio || 'sem município'}.`);
+  }
+
+  return result;
+}
+
+async function cacheResultIfNeeded(
+  result: EnderecoConsulta,
+  language: string,
+  region: string,
+  options: GeocodeReverseOptions
+) {
+  if (options.skipCache || !isCacheableGeocodeResult(result)) {
+    return;
+  }
+  if (options.cache) {
+    await options.cache.set(result, language, region);
+  } else {
+    pushCache(result, language, region);
+  }
+}
+
 export function getGeocoderProviderStats(
   apiKey = process.env.GOOGLE_MAPS_SERVER_KEY || '',
   allowMock = false,
@@ -226,7 +325,8 @@ export function getGeocoderProviderStats(
       habilitado: Boolean(provider && provider.isEnabled(request)),
       usados_na_sessao: providerUsage.get(name) || 0,
       cooldown_ativo: cooldownUntil > now,
-      cooldown_ate: cooldownUntil > now ? new Date(cooldownUntil).toISOString() : undefined
+      cooldown_ate: cooldownUntil > now ? new Date(cooldownUntil).toISOString() : undefined,
+      ...(provider?.getStatus?.() || {})
     };
   });
 }
@@ -269,22 +369,23 @@ export async function geocodeReverse(
   const providers = getProviderCandidates(request, options);
   let lastFailure: EnderecoConsulta | null = null;
 
-  for (const provider of providers) {
+  for (let index = 0; index < providers.length; index++) {
+    const provider = providers[index];
     if (!provider.isEnabled(request) || isCoolingDown(provider.name)) {
       continue;
     }
 
     incrementUsage(provider.name);
     const result = await provider.reverse(request);
-    if (result.status_api === 'SUCESSO' || isMockResult(result) || result.status_api === 'ZERO_RESULTS' || result.status_api === 'ZERO_RESULTADOS') {
-      if (!options.skipCache && isCacheableGeocodeResult(result)) {
-        if (options.cache) {
-          await options.cache.set(result, language, region);
-        } else {
-          pushCache(result, language, region);
-        }
-      }
-      return result;
+    if (isSuccessResult(result)) {
+      const finalResult = await maybeCrossCheckResult(result, providers, index, request);
+      await cacheResultIfNeeded(finalResult, language, region, options);
+      return finalResult;
+    }
+
+    if (isZeroResult(result)) {
+      lastFailure = result;
+      continue;
     }
 
     lastFailure = result;
@@ -294,6 +395,7 @@ export async function geocodeReverse(
   }
 
   if (lastFailure) {
+    await cacheResultIfNeeded(lastFailure, language, region, options);
     return lastFailure;
   }
 
