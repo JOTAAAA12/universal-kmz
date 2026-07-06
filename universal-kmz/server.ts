@@ -14,9 +14,11 @@ import {
   isPlaceholderGoogleKey,
   resolveGeocodeMode
 } from './src/geocoder';
+import { createPersistentGeocodeCache, registerGeocodeCacheShutdown } from './src/geocodeCache';
+import { GeocodeJobManager, geocodeCoordinateBatch } from './src/geocodeJobs';
 import { generateDownloadZip, generateKml, generateWorkbook } from './src/exporters';
 import * as XLSX from 'xlsx';
-import { ParserResult, EnderecoConsulta } from './src/types';
+import { Coordinate, ParserResult, EnderecoConsulta } from './src/types';
 
 function isMockGeocoderEnabled() {
   const mode = (process.env.GEOCODER_MODE || '').trim().toLowerCase();
@@ -130,6 +132,10 @@ function mergeParserResults(results: ParserResult[], fileName: string, fileHash:
 async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
+  const geocodeCache = createPersistentGeocodeCache();
+  await geocodeCache.load();
+  registerGeocodeCacheShutdown(geocodeCache);
+  const geocodeJobs = new GeocodeJobManager();
 
   // Set body parser margins to 50MB as requested by user instructions
   app.use(express.json({ limit: '50mb' }));
@@ -215,6 +221,95 @@ async function startServer() {
     });
   });
 
+  const buildGeocodeOperation = (apiKeyValue: string, allowMock: boolean, language: string, region: string) => (
+    coord: Coordinate
+  ) => geocodeReverse(
+    coord.lat,
+    coord.lng,
+    apiKeyValue,
+    language,
+    region,
+    { allowMock, cache: geocodeCache }
+  );
+
+  const buildGeocodeErrors = (results: EnderecoConsulta[]) => results
+    .filter(item => isOperationalGeocodeFailureStatus(item.status_api))
+    .map(item => ({
+      consulta_id: item.consulta_id,
+      status_api: item.status_api,
+      provider_status: item.provider_status,
+      provider_error_message: item.provider_error_message,
+      retryable: item.retryable
+    }));
+
+  app.post('/api/geocode/jobs', async (req, res) => {
+    try {
+      const { coordinates, language, region } = req.body;
+      const apiKeyValue = getServerGeocodingKey();
+      const allowMock = isMockGeocoderEnabled();
+
+      if (!coordinates || !Array.isArray(coordinates)) {
+        return res.status(400).json({ error: 'Lista de coordenadas ausente ou inválida.' });
+      }
+
+      const normalizedCoordinates = coordinates.map(normalizeCoordinate);
+      if (normalizedCoordinates.some(coord => coord === null)) {
+        return res.status(400).json({
+          error: 'Lista de coordenadas contém latitude/longitude inválidas.',
+          code: 'INVALID_COORDINATES'
+        });
+      }
+
+      if (!hasEnabledGeocoderProvider(apiKeyValue, allowMock)) {
+        const googleMissing = isPlaceholderGoogleKey(apiKeyValue);
+        return res.status(503).json({
+          error: 'Nenhum provedor de geocodificação habilitado para a cadeia configurada.',
+          code: 'GEOCODER_PROVIDER_UNAVAILABLE',
+          details: googleMissing
+            ? 'Google sem chave válida foi pulado. Ajuste GEOCODER_CHAIN, configure chaves de provedores, ou habilite mock explicitamente.'
+            : 'Ajuste GEOCODER_CHAIN ou configure as chaves necessárias para os provedores selecionados.',
+          providers: getGeocoderProviderStats(apiKeyValue, allowMock)
+        });
+      }
+
+      const safeLanguage = normalizeLanguage(language);
+      const safeRegion = normalizeRegion(region);
+      const snapshot = geocodeJobs.createJob(
+        normalizedCoordinates as Coordinate[],
+        buildGeocodeOperation(apiKeyValue, allowMock, safeLanguage, safeRegion)
+      );
+
+      return res.status(202).json(snapshot);
+    } catch (err: any) {
+      console.error('Error creating geocoding job:', err);
+      return res.status(500).json({ error: `Erro ao criar job de geocodificação: ${err.message}` });
+    }
+  });
+
+  app.get('/api/geocode/jobs/:id', (req, res) => {
+    const snapshot = geocodeJobs.getJob(req.params.id);
+    if (!snapshot) {
+      return res.status(404).json({ error: 'Job de geocodificação não encontrado.' });
+    }
+    return res.json(snapshot);
+  });
+
+  app.post('/api/geocode/jobs/:id/pause', (req, res) => {
+    const snapshot = geocodeJobs.pauseJob(req.params.id);
+    if (!snapshot) {
+      return res.status(404).json({ error: 'Job de geocodificação não encontrado.' });
+    }
+    return res.json(snapshot);
+  });
+
+  app.post('/api/geocode/jobs/:id/resume', (req, res) => {
+    const snapshot = geocodeJobs.resumeJob(req.params.id);
+    if (!snapshot) {
+      return res.status(404).json({ error: 'Job de geocodificação não encontrado.' });
+    }
+    return res.json(snapshot);
+  });
+
   // API Route: Bulk Geocode Reverse Coordination Set
   app.post('/api/geocode', async (req, res) => {
     try {
@@ -249,29 +344,12 @@ async function startServer() {
       const results: EnderecoConsulta[] = [];
       const safeLanguage = normalizeLanguage(language);
       const safeRegion = normalizeRegion(region);
-      
-      // Sequential processing with short wait to respect standard quotas nicely
-      for (const coord of normalizedCoordinates as { lat: number; lng: number }[]) {
-        const addr = await geocodeReverse(
-          coord.lat, 
-          coord.lng, 
-          apiKeyValue, 
-          safeLanguage, 
-          safeRegion,
-          { allowMock }
-        );
-        results.push(addr);
-      }
+      results.push(...await geocodeCoordinateBatch(
+        normalizedCoordinates as Coordinate[],
+        buildGeocodeOperation(apiKeyValue, allowMock, safeLanguage, safeRegion)
+      ));
 
-      const errors = results
-        .filter(item => isOperationalGeocodeFailureStatus(item.status_api))
-        .map(item => ({
-          consulta_id: item.consulta_id,
-          status_api: item.status_api,
-          provider_status: item.provider_status,
-          provider_error_message: item.provider_error_message,
-          retryable: item.retryable
-        }));
+      const errors = buildGeocodeErrors(results);
 
       const payload = {
         mode: resolveGeocodeMode(results, allowMock),
@@ -362,9 +440,7 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server compiled & running on host PORT http://localhost:${PORT}`);
-  });
+  app.listen(PORT, '0.0.0.0');
 }
 
 startServer();

@@ -20,12 +20,23 @@ export { generateMockAddress, isPlaceholderGoogleKey };
 
 type CachedEnderecoConsulta = EnderecoConsulta & { cache_language: string; cache_region: string };
 
+export interface GeocodeCacheStore {
+  get(
+    lat: number,
+    lng: number,
+    language: string,
+    region: string
+  ): EnderecoConsulta | null | Promise<EnderecoConsulta | null>;
+  set(item: EnderecoConsulta, language: string, region: string): void | Promise<void>;
+}
+
 interface GeocodeReverseOptions {
   allowMock?: boolean;
   providers?: GeocodeProvider[];
   env?: NodeJS.ProcessEnv;
   chain?: string[];
   skipCache?: boolean;
+  cache?: GeocodeCacheStore;
   timeoutMs?: number;
 }
 
@@ -100,6 +111,14 @@ function pushCache(item: EnderecoConsulta, language: string, region: string) {
 
 function isMockResult(item: EnderecoConsulta): boolean {
   return item.fonte === 'mock' || item.fonte === 'Mock' || item.status_api === 'Mocked';
+}
+
+export function isCacheableGeocodeResult(item: EnderecoConsulta): boolean {
+  return !isMockResult(item) && (
+    item.status_api === 'SUCESSO' ||
+    item.status_api === 'ZERO_RESULTS' ||
+    item.status_api === 'ZERO_RESULTADOS'
+  );
 }
 
 export function resolveGeocodeMode(results: EnderecoConsulta[], allowMock: boolean): 'google' | 'mock' {
@@ -238,7 +257,9 @@ export async function geocodeReverse(
   }
 
   if (!options.skipCache) {
-    const cacheItem = findInCache(lat, lng, 5, language, region);
+    const cacheItem = options.cache
+      ? await options.cache.get(lat, lng, language, region)
+      : findInCache(lat, lng, 5, language, region);
     if (cacheItem) {
       return cacheItem;
     }
@@ -255,9 +276,13 @@ export async function geocodeReverse(
 
     incrementUsage(provider.name);
     const result = await provider.reverse(request);
-    if (result.status_api === 'SUCESSO' || isMockResult(result)) {
-      if (!options.skipCache) {
-        pushCache(result, language, region);
+    if (result.status_api === 'SUCESSO' || isMockResult(result) || result.status_api === 'ZERO_RESULTS' || result.status_api === 'ZERO_RESULTADOS') {
+      if (!options.skipCache && isCacheableGeocodeResult(result)) {
+        if (options.cache) {
+          await options.cache.set(result, language, region);
+        } else {
+          pushCache(result, language, region);
+        }
       }
       return result;
     }

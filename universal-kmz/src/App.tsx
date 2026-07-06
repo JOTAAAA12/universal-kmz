@@ -41,10 +41,12 @@ export default function App() {
   const cancelGeocodingRef = useRef(false);
   const [pendingCoords, setPendingCoords] = useState<Coordinate[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
+  const [geocodeJobId, setGeocodeJobId] = useState('');
+  const [geocodeJobStatus, setGeocodeJobStatus] = useState<'idle' | 'running' | 'paused' | 'done' | 'error'>('idle');
+  const jobAppliedCountRef = useRef(0);
 
   // Unified logging for Auditoria tab
   const addAuditLog = (acao: string, entidade: string, antes: string, depois: string, status: 'SUCESSO' | 'ALERTA' | 'ERRO' = 'SUCESSO') => {
-    if (!result) return;
     const log: AuditoriaLog = {
       timestamp: new Date().toISOString(),
       evento: `Edição manual no Workspace: ${acao}`,
@@ -56,9 +58,12 @@ export default function App() {
       origem: 'App UI',
       status
     };
-    setResult({
-      ...result,
-      auditoria: [log, ...result.auditoria]
+    setResult(current => {
+      if (!current) return current;
+      return {
+        ...current,
+        auditoria: [log, ...current.auditoria]
+      };
     });
   };
 
@@ -71,6 +76,9 @@ export default function App() {
     analyzePendingCoordinates(parsed);
     setCurrentIndex(0);
     setGeocodeProgress(0);
+    setGeocodeJobId('');
+    setGeocodeJobStatus('idle');
+    jobAppliedCountRef.current = 0;
   };
 
   const analyzePendingCoordinates = (parsed: ParserResult, modeToUse = geocodeMode) => {
@@ -108,6 +116,74 @@ export default function App() {
     const coordsArray = Object.values(coordsMap);
     setPendingCoords(coordsArray);
     setGeocodeTotal(coordsArray.length);
+    setGeocodeJobId('');
+    setGeocodeJobStatus('idle');
+    jobAppliedCountRef.current = 0;
+  };
+
+  const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+  const pollGeocodeJob = async (jobId: string) => {
+    while (!cancelGeocodingRef.current) {
+      const res = await fetch(`/api/geocode/jobs/${jobId}`);
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data?.error || 'Falha ao consultar progresso do job.');
+      }
+
+      const fetchedAddrs: EnderecoConsulta[] = data.resultados || data.results || [];
+      const freshAddrs = fetchedAddrs.slice(jobAppliedCountRef.current);
+      freshAddrs.forEach(addr => updateStateWithGeocodedAddress(addr));
+      jobAppliedCountRef.current = fetchedAddrs.length;
+
+      setGeocodeProgress(data.feitos || 0);
+      setCurrentIndex(data.feitos || 0);
+      setGeocodeJobStatus(data.status || 'running');
+
+      if (data.status === 'done') {
+        addAuditLog('GEOCODE_COMPLETE', 'Processamento API', '-', `Processados: ${data.feitos}`, 'SUCESSO');
+        break;
+      }
+      if (data.status === 'paused') {
+        addAuditLog('GEOCODE_PAUSED', 'Processamento API', `Pausado em ${data.feitos}`, `Total: ${data.total}`, 'ALERTA');
+        break;
+      }
+      if (data.status === 'error') {
+        throw new Error(data.error || 'Job de geocodificação falhou.');
+      }
+
+      await wait(700);
+    }
+  };
+
+  const startOrResumeGeocodeJob = async () => {
+    cancelGeocodingRef.current = false;
+
+    if (geocodeJobId && geocodeJobStatus === 'paused') {
+      const resumeResponse = await fetch(`/api/geocode/jobs/${geocodeJobId}/resume`, { method: 'POST' });
+      const resumeData = await resumeResponse.json();
+      if (!resumeResponse.ok) {
+        throw new Error(resumeData?.error || 'Falha ao retomar job de geocodificação.');
+      }
+      setGeocodeJobStatus(resumeData.status || 'running');
+      await pollGeocodeJob(geocodeJobId);
+      return;
+    }
+
+    const response = await fetch('/api/geocode/jobs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ coordinates: pendingCoords })
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data?.error || 'Falha ao criar job de geocodificação.');
+    }
+
+    setGeocodeJobId(data.id);
+    setGeocodeJobStatus(data.status || 'running');
+    jobAppliedCountRef.current = 0;
+    await pollGeocodeJob(data.id);
   };
 
   // Run/Resume batch geocoding loop
@@ -121,6 +197,19 @@ export default function App() {
 
     // Record audit run starting
     addAuditLog('GEOCODE_START', 'Processamento API', `Registros a processar: ${pendingCoords.length}`, `Indice atual: ${idx}`);
+
+    if (pendingCoords.length > 20) {
+      try {
+        await startOrResumeGeocodeJob();
+      } catch (e) {
+        const message = e instanceof Error ? e.message : 'Falha inesperada no job de geocodificação.';
+        setGeocodeError(message);
+        addAuditLog('GEOCODE_ERROR', 'Processamento API', 'Job em lote', message, 'ERRO');
+      } finally {
+        setIsGeocoding(false);
+      }
+      return;
+    }
 
     while (idx < pendingCoords.length && !cancelGeocodingRef.current) {
       const coord = pendingCoords[idx];
@@ -182,6 +271,10 @@ export default function App() {
   };
 
   const handlePauseGeocoding = () => {
+    if (geocodeJobId && geocodeJobStatus === 'running') {
+      void fetch(`/api/geocode/jobs/${geocodeJobId}/pause`, { method: 'POST' });
+      setGeocodeJobStatus('paused');
+    }
     cancelGeocodingRef.current = true;
     setIsGeocoding(false);
   };
@@ -191,30 +284,38 @@ export default function App() {
     setIsGeocoding(false);
     setCurrentIndex(0);
     setGeocodeProgress(0);
+    if (geocodeJobId && geocodeJobStatus === 'running') {
+      void fetch(`/api/geocode/jobs/${geocodeJobId}/pause`, { method: 'POST' });
+    }
+    setGeocodeJobId('');
+    setGeocodeJobStatus('idle');
+    jobAppliedCountRef.current = 0;
   };
 
   // Reactively updatesPoints, Trechos, Polygons and Addresses cached states
   const updateStateWithGeocodedAddress = (addr: EnderecoConsulta) => {
-    if (!result) return;
+    setResult(current => {
+      if (!current) return current;
+      const result = current;
 
-    // Normalize address keys and guarantee a fallback empty string for missing or partial fields
-    const safeAddr: EnderecoConsulta = {
-      ...addr,
-      endereco_formatado: addr.endereco_formatado || '',
-      logradouro: addr.logradouro || '',
-      numero: addr.numero || '',
-      bairro: addr.bairro || '',
-      subdistrito: addr.subdistrito || '',
-      distrito: addr.distrito || '',
-      municipio: addr.municipio || '',
-      uf: addr.uf || '',
-      cep: addr.cep || '',
-      pais: addr.pais || '',
-      place_id: addr.place_id || '',
-      plus_code: addr.plus_code || '',
-      status_api: addr.status_api || 'SUCESSO',
-      fonte: addr.fonte || 'Geocoding API',
-    };
+      // Normalize address keys and guarantee a fallback empty string for missing or partial fields
+      const safeAddr: EnderecoConsulta = {
+        ...addr,
+        endereco_formatado: addr.endereco_formatado || '',
+        logradouro: addr.logradouro || '',
+        numero: addr.numero || '',
+        bairro: addr.bairro || '',
+        subdistrito: addr.subdistrito || '',
+        distrito: addr.distrito || '',
+        municipio: addr.municipio || '',
+        uf: addr.uf || '',
+        cep: addr.cep || '',
+        pais: addr.pais || '',
+        place_id: addr.place_id || '',
+        plus_code: addr.plus_code || '',
+        status_api: addr.status_api || 'SUCESSO',
+        fonte: addr.fonte || 'Geocoding API',
+      };
 
     const updatedPontos = result.pontos.map(p => {
       // match coordinate rounded mapping within ~5 meters (5 decimal places)
@@ -293,17 +394,18 @@ export default function App() {
     const geocodedRecords = updatedEnderecos.filter(item => item.fonte !== 'Original');
     const completedCount = updatedEnderecos.filter(item => item.endereco_formatado && item.status_api === 'SUCESSO').length;
 
-    setResult({
-      ...result,
-      pontos: updatedPontos,
-      trechos: updatedTrechos,
-      poligonos: updatedPoligonos,
-      enderecos: updatedEnderecos,
-      resumo: {
-        ...result.resumo,
-        resultados_completos: completedCount,
-        chamadas_realizadas: geocodedRecords.length
-      }
+      return {
+        ...result,
+        pontos: updatedPontos,
+        trechos: updatedTrechos,
+        poligonos: updatedPoligonos,
+        enderecos: updatedEnderecos,
+        resumo: {
+          ...result.resumo,
+          resultados_completos: completedCount,
+          chamadas_realizadas: geocodedRecords.length
+        }
+      };
     });
   };
 
@@ -312,6 +414,9 @@ export default function App() {
     setOriginalFile(null);
     setCurrentIndex(0);
     setGeocodeProgress(0);
+    setGeocodeJobId('');
+    setGeocodeJobStatus('idle');
+    jobAppliedCountRef.current = 0;
   };
 
   return (
@@ -398,6 +503,11 @@ export default function App() {
                       {geocodeMode}
                     </span>
                   )}
+                  {pendingCoords.length > 20 && geocodeJobStatus !== 'idle' && (
+                    <span className="text-[10px] bg-slate-100 text-slate-700 px-2 py-0.5 rounded border border-slate-200 font-bold uppercase font-mono">
+                      Job {geocodeJobStatus}
+                    </span>
+                  )}
                 </div>
                 
                 {/* Micro progress meter */}
@@ -432,7 +542,7 @@ export default function App() {
                         id="start-enrich-geocode-btn"
                       >
                         <Play className="h-3.5 w-3.5" />
-                        {currentIndex > 0 ? 'Retomar' : 'Iniciar Geocodificação'}
+                        {geocodeJobStatus === 'paused' ? 'Retomar Job' : currentIndex > 0 ? 'Retomar' : 'Iniciar Geocodificação'}
                       </button>
                     ) : (
                       <button
