@@ -1,0 +1,29 @@
+{
+  "project_name": "universal-kmz",
+  "current_phase": "pericial-mode-slice-2",
+  "active_task": "pericial-export-manifest",
+  "last_updated": "2026-06-25",
+  "model_routing": {
+    "maestro": "gpt-5.5",
+    "background_workers": ["gpt-5.4-mini"],
+    "technical_precision": ["gpt-5.3-codex-spark"]
+  },
+  "completed_tasks": [
+    "pericial-contract-and-parse-harness",
+    "pericial-export-manifest"
+  ],
+  "pending_tasks": [
+    "add pericial executive workbook sheets",
+    "add pericial UI flow",
+    "add markdown and future DOCX gates",
+    "run Docker smoke for pericial mode"
+  ],
+  "blocked_tasks": [
+    {
+      "task": "official municipal overlay",
+      "reason": "requires official boundary layer input or an approved official-source loader"
+    }
+  ],
+  "stop_condition": "",
+  "next_action": "add initial pericial executive workbook sheets without changing existing workbook tabs"
+}

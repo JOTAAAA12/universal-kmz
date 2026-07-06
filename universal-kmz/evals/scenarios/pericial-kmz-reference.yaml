@@ -1,0 +1,20 @@
+id: pericial-kmz-reference
+title: Modo Pericial KMZ/KML - contrato de parse inicial
+mode: local
+input_fixture: scripts/fixtures/pericial-referencia.kml
+command: npm.cmd run test:pericial:parse
+additional_commands:
+  - npm.cmd run test:pericial:export
+expected:
+  placemarks: 2
+  points: 1
+  linestrings: 1
+  polygons: 0
+  processing_mode: PERICIAL
+  requires_official_source_block: true
+  zip_manifest: pericial/manifesto-pericial.json
+forbidden:
+  - network_calls
+  - real_credentials
+  - mock_geocoding_as_official
+  - invented_municipality

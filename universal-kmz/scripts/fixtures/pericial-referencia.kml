@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>pericial-referencia.kml</name>
+    <Folder>
+      <name>Conjunto Pericial</name>
+      <Placemark>
+        <name>PT-001</name>
+        <description>Comprovante de localizacao por ponto</description>
+        <ExtendedData>
+          <Data name="prova_id"><value>PV-2026-001</value></Data>
+          <Data name="operador"><value>analista-labs</value></Data>
+          <Data name="hash_provedor"><value>TRACE-001</value></Data>
+        </ExtendedData>
+        <Point>
+          <coordinates>-46.633300,-23.550520,0</coordinates>
+        </Point>
+      </Placemark>
+      <Placemark>
+        <name>TR-001</name>
+        <description>Tracado de conferencia</description>
+        <LineString>
+          <coordinates>-46.633300,-23.550520,0 -46.633900,-23.551020,0</coordinates>
+        </LineString>
+      </Placemark>
+    </Folder>
+  </Document>
+</kml>

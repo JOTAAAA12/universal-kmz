@@ -1,0 +1,6 @@
+{
+  "name": "Universal KMZ/KML Reader",
+  "description": "Visualize and inspect KMZ/KML files, extract addresses and geographical data, enrich with Google Maps APIs, and export complete reports in multiple formats.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
