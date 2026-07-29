@@ -48,6 +48,16 @@ GEOCODE_CACHE_DIR=/app/dados
 
 O volume `./dados:/app/dados` guarda CNEFE e cache persistente.
 
+### Segurança
+
+Por padrão, o servidor escuta em `127.0.0.1` (localhost apenas). Para uso em Docker ou rede, configure:
+
+```env
+HOST=0.0.0.0
+```
+
+No Docker, a variável `HOST` já está definida como `0.0.0.0` no `docker-compose.yml`. Em ambiente local (desenvolvimento), o servidor permanece em `127.0.0.1` por segurança padrão.
+
 ## Provedores
 
 | Provedor | Precisa de chave? | Limite gratuito / observação | Variáveis |

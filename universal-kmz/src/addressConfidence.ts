@@ -10,6 +10,7 @@ const EXTERNAL_GEOCODER_SOURCES = new Set([
   'locationiq',
   'geoapify',
   'bigdatacloud',
+  'cnefe',
   'geocoder-chain'
 ]);
 

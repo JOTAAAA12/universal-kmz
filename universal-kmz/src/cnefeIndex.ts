@@ -438,6 +438,8 @@ async function ingestFile(
 
   try {
     begin();
+    // Clean up any orphaned rows from previous interrupted ingestion
+    db.prepare('DELETE FROM enderecos WHERE source = ?').run(file.path);
     for await (const line of reader) {
       if (!line.trim()) continue;
       if (!columns) {

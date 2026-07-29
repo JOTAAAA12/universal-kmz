@@ -221,6 +221,7 @@ function mergeParserResults(results: ParserResult[], fileName: string, fileHash:
 async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
+  const HOST = process.env.HOST || '127.0.0.1';
   const geocodeCache = createPersistentGeocodeCache();
   let cnefeProviderState = buildCnefeProviderState(null, 'carregando', 'Indexação CNEFE em andamento.');
   let activeCnefeIndex: (CnefeIndex & { close?: () => void }) | null = null;
@@ -396,6 +397,32 @@ async function startServer() {
         // Base64 decoding for zipped binary
         const zipData = Buffer.from(content, 'base64');
         const zipped = await JSZip.loadAsync(zipData);
+
+        // Anti zip-bomb guard: verify uncompressed size and entry count
+        const MAX_UNCOMPRESSED_BYTES = 300 * 1024 * 1024; // 300 MB
+        const MAX_ENTRIES = 100;
+        let totalUncompressedSize = 0;
+        let entryCount = 0;
+
+        zipped.forEach((relativePath, file) => {
+          if (!file.dir) {
+            entryCount++;
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            totalUncompressedSize += (file as any)._data?.uncompressedSize || 0;
+          }
+        });
+
+        if (totalUncompressedSize > MAX_UNCOMPRESSED_BYTES) {
+          return res.status(400).json({
+            error: `Arquivo KMZ muito grande. Tamanho descomprimido: ${(totalUncompressedSize / 1024 / 1024).toFixed(1)} MB. Máximo permitido: 300 MB.`
+          });
+        }
+
+        if (entryCount > MAX_ENTRIES) {
+          return res.status(400).json({
+            error: `Arquivo KMZ contém muitos arquivos. Quantidade: ${entryCount}. Máximo permitido: 100.`
+          });
+        }
 
         const kmlEntries: { path: string; kml: string }[] = [];
         zipped.forEach((relativePath, file) => {
@@ -873,7 +900,7 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  app.listen(PORT, HOST, () => {
     startCnefeIndexInBackground();
   });
 }

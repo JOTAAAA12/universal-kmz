@@ -241,38 +241,33 @@ export default function TabelaView({
 
   // Inverter start/fim of Trecho (reverses points, swaps lat, lng and addresses)
   const handleInvertTrecho = (trecho_id: string) => {
-    const backupTrechos = [...result.trechos];
-    const trechoIndex = backupTrechos.findIndex(t => t.trecho_id === trecho_id);
+    const trechoIndex = result.trechos.findIndex(t => t.trecho_id === trecho_id);
 
     if (trechoIndex !== -1) {
-      const target = backupTrechos[trechoIndex];
+      const target = result.trechos[trechoIndex];
       const antesTxt = `Início: (${target.inicio_lat}, ${target.inicio_lng}) - Fim: (${target.fim_lat}, ${target.fim_lng})`;
 
-      // Swapping coordinates and addresses
-      const tempLat = target.inicio_lat;
-      const tempLng = target.inicio_lng;
-      const tempAddr = target.inicio_endereco;
-      const tempPlaceId = target.inicio_place_id;
+      // Create new trecho object with swapped coordinates and addresses
+      const invertedTrecho: typeof target = {
+        ...target,
+        inicio_lat: target.fim_lat,
+        inicio_lng: target.fim_lng,
+        inicio_endereco: target.fim_endereco,
+        inicio_place_id: target.fim_place_id,
+        fim_lat: target.inicio_lat,
+        fim_lng: target.inicio_lng,
+        fim_endereco: target.inicio_endereco,
+        fim_place_id: target.inicio_place_id,
+        direcao_original: target.direcao_original === 'Normal' ? 'Invertida' : 'Normal',
+        inicio_fim_invertido: !target.inicio_fim_invertido,
+        status: 'Revertido Manualmente'
+      };
 
-      target.inicio_lat = target.fim_lat;
-      target.inicio_lng = target.fim_lng;
-      target.inicio_endereco = target.fim_endereco;
-      target.inicio_place_id = target.fim_place_id;
+      const depoisTxt = `Início: (${invertedTrecho.inicio_lat}, ${invertedTrecho.inicio_lng}) - Fim: (${invertedTrecho.fim_lat}, ${invertedTrecho.fim_lng})`;
 
-      target.fim_lat = tempLat;
-      target.fim_lng = tempLng;
-      target.fim_endereco = tempAddr;
-      target.fim_place_id = tempPlaceId;
-
-      target.direcao_original = target.direcao_original === 'Normal' ? 'Invertida' : 'Normal';
-      target.inicio_fim_invertido = !target.inicio_fim_invertido;
-      target.status = 'Revertido Manualmente';
-
-      const depoisTxt = `Início: (${target.inicio_lat}, ${target.inicio_lng}) - Fim: (${target.fim_lat}, ${target.fim_lng})`;
-
-    const updatedResults: ParserResult = {
+      const updatedResults: ParserResult = {
         ...result,
-        trechos: backupTrechos
+        trechos: result.trechos.map((t, idx) => idx === trechoIndex ? invertedTrecho : t)
       };
 
       onUpdateResult(recalculateAddressSummary(updatedResults));
@@ -292,49 +287,93 @@ export default function TabelaView({
   };
 
   const handleSaveEdit = (type: TabType, id: string) => {
-    const updated = { ...result };
+    let updated: ParserResult = result;
     let antes = '';
     let depois = '';
 
     if (type === 'features') {
-      const idx = updated.features.findIndex(f => f.feature_id === id);
+      const idx = result.features.findIndex(f => f.feature_id === id);
       if (idx !== -1) {
-        antes = `Nome: ${updated.features[idx].placemark_nome}, Desc: ${updated.features[idx].placemark_descricao}`;
-        updated.features[idx].placemark_nome = editFields.nome || updated.features[idx].placemark_nome;
-        updated.features[idx].placemark_descricao = editFields.descricao || updated.features[idx].placemark_descricao;
-        if (editFields.status) {
-          updated.features[idx].status_validacao = editFields.status as any;
-        }
-        depois = `Nome: ${updated.features[idx].placemark_nome}, Desc: ${updated.features[idx].placemark_descricao}, Stat: ${updated.features[idx].status_validacao}`;
+        const oldFeature = result.features[idx];
+        antes = `Nome: ${oldFeature.placemark_nome}, Desc: ${oldFeature.placemark_descricao}`;
+
+        const newFeature = {
+          ...oldFeature,
+          placemark_nome: editFields.nome || oldFeature.placemark_nome,
+          placemark_descricao: editFields.descricao || oldFeature.placemark_descricao,
+          status_validacao: editFields.status ? (editFields.status as any) : oldFeature.status_validacao
+        };
+
+        updated = {
+          ...result,
+          features: result.features.map(f => f.feature_id === id ? newFeature : f)
+        };
+
+        depois = `Nome: ${newFeature.placemark_nome}, Desc: ${newFeature.placemark_descricao}, Stat: ${newFeature.status_validacao}`;
         onTriggerAuditLog('EDIT_FEATURE', `Feature: ${id}`, antes, depois);
       }
     } else if (type === 'pontos') {
-      const idx = updated.pontos.findIndex(p => p.point_id === id);
+      const idx = result.pontos.findIndex(p => p.point_id === id);
       if (idx !== -1) {
-        antes = `Endereço: ${updated.pontos[idx].endereco_formatado}, Obs: ${updated.pontos[idx].observacoes}`;
-        updated.pontos[idx].endereco_formatado = editFields.endereco || updated.pontos[idx].endereco_formatado;
-        updated.pontos[idx].observacoes = editFields.obs || updated.pontos[idx].observacoes;
-        updated.pontos[idx].necessita_revisao = editFields.revisado === 'NÃO';
-        depois = `Endereço: ${updated.pontos[idx].endereco_formatado}, Obs: ${updated.pontos[idx].observacoes}, Rev: ${editFields.revisado}`;
-        Object.assign(updated, upsertManualPointAddress(updated, updated.pontos[idx]));
+        const oldPonto = result.pontos[idx];
+        antes = `Endereço: ${oldPonto.endereco_formatado}, Obs: ${oldPonto.observacoes}`;
+
+        const newPonto = {
+          ...oldPonto,
+          endereco_formatado: editFields.endereco || oldPonto.endereco_formatado,
+          observacoes: editFields.obs || oldPonto.observacoes,
+          necessita_revisao: editFields.revisado === 'NÃO'
+        };
+
+        updated = {
+          ...result,
+          pontos: result.pontos.map(p => p.point_id === id ? newPonto : p)
+        };
+
+        // Upsert manual address with new ponto data
+        updated = upsertManualPointAddress(updated, newPonto);
+
+        depois = `Endereço: ${newPonto.endereco_formatado}, Obs: ${newPonto.observacoes}, Rev: ${editFields.revisado}`;
         onTriggerAuditLog('EDIT_PONTO', `Ponto: ${id}`, antes, depois);
       }
     } else if (type === 'trechos') {
-      const idx = updated.trechos.findIndex(t => t.trecho_id === id);
+      const idx = result.trechos.findIndex(t => t.trecho_id === id);
       if (idx !== -1) {
-        antes = `Nome: ${updated.trechos[idx].nome_original}, Obs: ${updated.trechos[idx].observacoes}`;
-        updated.trechos[idx].nome_original = editFields.nome || updated.trechos[idx].nome_original;
-        updated.trechos[idx].observacoes = editFields.obs || updated.trechos[idx].observacoes;
-        depois = `Nome: ${updated.trechos[idx].nome_original}, Obs: ${updated.trechos[idx].observacoes}`;
+        const oldTrecho = result.trechos[idx];
+        antes = `Nome: ${oldTrecho.nome_original}, Obs: ${oldTrecho.observacoes}`;
+
+        const newTrecho = {
+          ...oldTrecho,
+          nome_original: editFields.nome || oldTrecho.nome_original,
+          observacoes: editFields.obs || oldTrecho.observacoes
+        };
+
+        updated = {
+          ...result,
+          trechos: result.trechos.map(t => t.trecho_id === id ? newTrecho : t)
+        };
+
+        depois = `Nome: ${newTrecho.nome_original}, Obs: ${newTrecho.observacoes}`;
         onTriggerAuditLog('EDIT_TRECHO', `Trecho: ${id}`, antes, depois);
       }
     } else if (type === 'poligonos') {
-      const idx = updated.poligonos.findIndex(p => p.poligono_id === id);
+      const idx = result.poligonos.findIndex(p => p.poligono_id === id);
       if (idx !== -1) {
-        antes = `Nome: ${updated.poligonos[idx].nome_original}, Obs: ${updated.poligonos[idx].observacoes}`;
-        updated.poligonos[idx].nome_original = editFields.nome || updated.poligonos[idx].nome_original;
-        updated.poligonos[idx].observacoes = editFields.obs || updated.poligonos[idx].observacoes;
-        depois = `Nome: ${updated.poligonos[idx].nome_original}, Obs: ${updated.poligonos[idx].observacoes}`;
+        const oldPoligono = result.poligonos[idx];
+        antes = `Nome: ${oldPoligono.nome_original}, Obs: ${oldPoligono.observacoes}`;
+
+        const newPoligono = {
+          ...oldPoligono,
+          nome_original: editFields.nome || oldPoligono.nome_original,
+          observacoes: editFields.obs || oldPoligono.observacoes
+        };
+
+        updated = {
+          ...result,
+          poligonos: result.poligonos.map(p => p.poligono_id === id ? newPoligono : p)
+        };
+
+        depois = `Nome: ${newPoligono.nome_original}, Obs: ${newPoligono.observacoes}`;
         onTriggerAuditLog('EDIT_POLIGONO', `Polígono: ${id}`, antes, depois);
       }
     }

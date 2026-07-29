@@ -95,6 +95,37 @@ const mergedAddresses = mergeExternalAddressRecord(withCity.enderecos, externalM
 assert.equal(mergedAddresses.length, 1);
 assert.equal(mergedAddresses[0].fonte, 'google');
 
+// Test case for CNEFE source recognition (RED: should fail before fix)
+const cnefeExternalMismatch: EnderecoConsulta = {
+  consulta_id: 'GEO--23.55050--46.63330',
+  latitude: -23.5505,
+  longitude: -46.6333,
+  coordenada_normalizada: '-23.55050,-46.63330',
+  endereco_formatado: 'Rua CNEFE, 456 - Centro, AlgumaOutraCidade - ZZ',
+  logradouro: 'Rua CNEFE',
+  numero: '456',
+  bairro: 'Centro',
+  municipio: 'AlgumaOutraCidade',
+  uf: 'ZZ',
+  cep: '12345-678',
+  pais: 'Brasil',
+  status_api: 'SUCESSO',
+  quantidade_resultados: 1,
+  fonte: 'cnefe',
+  cache_hit: false,
+  necessita_revisao: false
+};
+
+const mergedCnefeMismatch = mergePointWithGeocodedAddress(withCity.pontos[0], cnefeExternalMismatch);
+assert.equal(mergedCnefeMismatch.municipio, 'CidadeDoArquivo', 'CNEFE source should be external; conflicting municipality should be preserved');
+assert.equal(mergedCnefeMismatch.uf, 'ZZ', 'CNEFE source should be external; conflicting UF should be preserved');
+assert.equal(mergedCnefeMismatch.endereco_formatado, undefined, 'CNEFE source should be external; original address should be preserved');
+assert.equal(mergedCnefeMismatch.origem_endereco, 'Original', 'When conflict detected, origen_endereco should remain Original');
+assert.equal(mergedCnefeMismatch.status_api, 'SUCESSO');
+assert.equal(mergedCnefeMismatch.necessita_revisao, true, 'CNEFE conflict should flag for review');
+assert.match(mergedCnefeMismatch.conflito_endereco || '', /CidadeDoArquivo/, 'Conflict note should mention original city');
+assert.match(mergedCnefeMismatch.conflito_endereco || '', /AlgumaOutraCidade/, 'Conflict note should mention CNEFE city');
+
 const lineOnly = parseFixture('linha.kml', `<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
   <Document>

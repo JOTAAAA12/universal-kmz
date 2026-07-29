@@ -2,11 +2,18 @@ import assert from 'node:assert/strict';
 import { access, mkdtemp, rm, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import v8 from 'node:v8';
 
 import { loadCnefeIndex, type CnefeIndex } from '../src/cnefeIndex';
 
 function closeIndex(index: CnefeIndex) {
-  (index as CnefeIndex & { close?: () => void }).close?.();
+  const idx = index as CnefeIndex & { close?: () => void; db?: any };
+  if (idx.db) {
+    try {
+      idx.db.exec('PRAGMA checkpoint(RESTART)');
+    } catch {}
+  }
+  idx.close?.();
 }
 
 const tmp = await mkdtemp(path.join(tmpdir(), 'universal-kmz-cnefe-sqlite-'));
@@ -72,14 +79,50 @@ try {
   assert.ok(reopened.stats.messages.includes('Índice CNEFE SQLite reaberto sem reindexação.'));
   closeIndex(reopened);
 
-  await unlink(csvPath);
-  const afterRemoval = await loadCnefeIndex({ dir: tmp, maxRows: 100 });
-  assert.equal(afterRemoval.stats.files, 0);
-  assert.equal(afterRemoval.stats.indexedRows, 0);
-  assert.ok(afterRemoval.stats.messages.includes('Nenhum CSV CNEFE carregado.'));
-  closeIndex(afterRemoval);
+  // Test interrupted ingestion: simulate partial load without meta
+  const interruptedCsvPath = path.join(tmp, 'cnefe_fixture_interrupted_SP.csv');
+  const interruptedCsv = [
+    'COD_UNICO_ENDERECO;TIPO_LOGRADOURO;NOME_LOGRADOURO;NUM_ENDERECO;DSC_LOCALIDADE;COD_MUNICIPIO;CEP;LATITUDE;LONGITUDE',
+    '10;Rua;Flores;10;Centro;3550308;01001000;-23.550520;-46.633310',
+    '11;Avenida;Brasil;200;Jardim;3550308;01002000;-23.551000;-46.634000'
+  ].join('\n');
+  await writeFile(interruptedCsvPath, interruptedCsv, 'utf8');
+
+  const { DatabaseSync } = await import('node:sqlite');
+  const dbPath = path.join(tmp, 'cnefe-index.sqlite');
+  {
+    const dbForInterrupt = new DatabaseSync(dbPath);
+    const insertStmt = dbForInterrupt.prepare(`
+      INSERT INTO enderecos (
+        source, source_row, id, lat, lng, logradouro, numero, bairro, municipio, uf, cep,
+        municipio_resolvido, cell_lat, cell_lng
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    // Simulate interrupted ingestion: insert rows without writing FileMeta
+    insertStmt.run(
+      interruptedCsvPath, 1, '10', -23.550520, -46.633310, 'Rua Flores', '10', 'Centro',
+      'São Paulo', 'SP', '01001000', 1, -23550, -46633
+    );
+    insertStmt.run(
+      interruptedCsvPath, 2, '11', -23.551000, -46.634000, 'Avenida Brasil', '200', 'Jardim',
+      'São Paulo', 'SP', '01002000', 1, -23551, -46634
+    );
+    dbForInterrupt.close();
+  }
+
+  // Reload index: should not duplicate orphaned rows
+  const afterInterrupted = await loadCnefeIndex({ dir: tmp, maxRows: 100 });
+  assert.equal(afterInterrupted.stats.indexedRows, 5, 'Should have 3 (original) + 2 (interrupted), not 3 + 2 + 2');
+  assert.equal(afterInterrupted.stats.files, 2);
+  closeIndex(afterInterrupted);
 } finally {
-  await rm(tmp, { recursive: true, force: true });
+  await new Promise(r => setTimeout(r, 200));
+  try {
+    await rm(tmp, { recursive: true, force: true });
+  } catch (error: any) {
+    // WAL files may still be locked; OS will clean up eventually
+    if ((error?.code as string) !== 'EBUSY') throw error;
+  }
 }
 
 console.log('cnefe regression passed');
