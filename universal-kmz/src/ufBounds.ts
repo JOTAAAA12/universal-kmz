@@ -1,3 +1,5 @@
+import ufMalhas from './data/ufMalhas.json';
+
 export interface UfBox {
   minLat: number;
   maxLat: number;
@@ -38,16 +40,53 @@ export const UF_BOUNDS: Record<string, UfBox> = {
   TO: { minLat: -13.569, maxLat: -5.068, minLng: -50.843, maxLng: -45.599 }
 };
 
+type Anel = [number, number][];
+const MALHAS = ufMalhas as unknown as Record<string, Anel[]>;
+
+function dentroDoAnel(lat: number, lng: number, anel: Anel): boolean {
+  // Ray casting. O anel vem do IBGE como [lng, lat].
+  let dentro = false;
+  for (let i = 0, j = anel.length - 1; i < anel.length; j = i++) {
+    const [lngI, latI] = anel[i];
+    const [lngJ, latJ] = anel[j];
+    const cruza = (latI > lat) !== (latJ > lat) &&
+      lng < ((lngJ - lngI) * (lat - latI)) / (latJ - latI) + lngI;
+    if (cruza) dentro = !dentro;
+  }
+  return dentro;
+}
+
+function ufsCandidatasPorCaixa(lat: number, lng: number): string[] {
+  return Object.entries(UF_BOUNDS)
+    .filter(([, box]) => lat >= box.minLat && lat <= box.maxLat && lng >= box.minLng && lng <= box.maxLng)
+    .map(([uf]) => uf);
+}
+
+/**
+ * UFs candidatas para um conjunto de coordenadas.
+ *
+ * A caixa envolvente serve de pré-filtro barato; o polígono da UF (malha do IBGE)
+ * decide. Sem o polígono, um ponto em Goiânia sugeria também MG só porque as
+ * caixas se sobrepõem.
+ *
+ * Se nenhum polígono contiver o ponto — buraco da simplificação, ponto no mar,
+ * coordenada em divisa exata — voltamos às candidatas da caixa. Sugerir a mais é
+ * aceitável (o usuário confirma cada download); omitir deixaria pontos sem cobertura.
+ */
 export function detectUfs(coords: { lat: number; lng: number }[]): string[] {
   const found = new Set<string>();
 
   for (const { lat, lng } of coords) {
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
 
-    for (const [uf, box] of Object.entries(UF_BOUNDS)) {
-      if (lat >= box.minLat && lat <= box.maxLat && lng >= box.minLng && lng <= box.maxLng) {
-        found.add(uf);
-      }
+    const candidatas = ufsCandidatasPorCaixa(lat, lng);
+    if (candidatas.length === 0) continue;
+
+    const porPoligono = candidatas.filter(uf =>
+      (MALHAS[uf] || []).some(anel => dentroDoAnel(lat, lng, anel)));
+
+    for (const uf of porPoligono.length > 0 ? porPoligono : candidatas) {
+      found.add(uf);
     }
   }
 
