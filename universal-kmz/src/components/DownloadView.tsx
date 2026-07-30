@@ -13,10 +13,12 @@ interface DownloadViewProps {
 
 export default function DownloadView({ result, originalName }: DownloadViewProps) {
   const [downloadingType, setDownloadingType] = useState<string | null>(null);
+  const [error, setError] = useState('');
 
   // Trigger file download via client blob trigger
   const triggerDownload = async (endpoint: string, payload: any, defaultFilename: string) => {
     setDownloadingType(endpoint);
+    setError('');
     try {
       const response = await fetch(endpoint, {
         method: 'POST',
@@ -37,9 +39,8 @@ export default function DownloadView({ result, originalName }: DownloadViewProps
       link.click();
       link.parentNode?.removeChild(link);
       window.URL.revokeObjectURL(url);
-    } catch (err) {
-      console.error(err);
-      alert('Erro ao tentar baixar o arquivo. Verifique se o servidor está ativo.');
+    } catch {
+      setError('Erro ao tentar baixar o arquivo. Verifique se o servidor está ativo.');
     } finally {
       setDownloadingType(null);
     }
@@ -63,6 +64,7 @@ export default function DownloadView({ result, originalName }: DownloadViewProps
   const [exportFormat, setExportFormat] = useState<'xlsx' | 'csv'>('xlsx');
 
   const handleExportCustomMetadata = () => {
+    setError('');
     try {
       const fileBaseName = originalName.replace(/\.[^/.]+$/, '');
       const wb = generateWorkbook(result);
@@ -86,8 +88,7 @@ export default function DownloadView({ result, originalName }: DownloadViewProps
         }
       } else { // exporting as csv
         if (exportTable === 'Todo') {
-          // To export all in CSV format, we'll pack them in a zip or prompt user
-          alert('Para exportar todos os dados combinados em CSV, use a opção de baixar o arquivo ZIP principal (que já inclui todos os arquivos CSV individuais nas subpastas) ou selecione uma tabela específica na lista acima para download instantâneo de CSV.');
+          setError('Para exportar todos os dados combinados em CSV, use a opção de baixar o arquivo ZIP principal ou selecione uma tabela específica para o download de CSV.');
           return;
         }
         
@@ -100,9 +101,9 @@ export default function DownloadView({ result, originalName }: DownloadViewProps
         const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
         handleDownloadLocalFile(blob, 'text/csv;charset=utf-8;', `${fileBaseName}-metadados-${exportTable.toLowerCase()}.csv`);
       }
-    } catch (error: any) {
-      console.error(error);
-      alert(`Erro na exportação de metadados: ${error.message}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Erro desconhecido.';
+      setError(`Erro na exportação de metadados: ${message}`);
     }
   };
 
@@ -164,6 +165,12 @@ export default function DownloadView({ result, originalName }: DownloadViewProps
           Exporte planilhas completas e pacotes geográficos normalizados em múltiplos formatos homologados.
         </p>
       </div>
+
+      {error && (
+        <div role="alert" className="rounded border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700">
+          {error}
+        </div>
+      )}
 
       {/* Main Download Grid Card Options */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">

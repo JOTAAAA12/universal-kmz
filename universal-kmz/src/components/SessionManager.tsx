@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { CheckCircle2, FolderOpen, Loader2, Save, Trash2, X } from 'lucide-react';
+import Modal from './Modal';
 
 export interface SavedSessionMeta {
   id: string;
@@ -147,20 +148,24 @@ export default function SessionManager<TPayload>({
   };
 
   return (
-    <div className="fixed inset-0 z-[75] flex items-start justify-center bg-slate-950/40 p-4 backdrop-blur-sm md:items-center">
-      <section className="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded border border-slate-300 bg-white shadow-xl">
+    <Modal
+      onClose={onClose}
+      titleId="session-manager-title"
+      backdropClassName="fixed inset-0 z-[75] flex items-start justify-center bg-slate-950/40 p-4 backdrop-blur-sm md:items-center"
+      dialogClassName="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded border border-slate-300 bg-white shadow-xl"
+    >
         <header className="sticky top-0 z-10 flex items-center justify-between border-b border-slate-300 bg-white px-5 py-4">
           <div className="flex items-center gap-2">
             <FolderOpen className="h-4 w-4 text-indigo-600" />
-            <h2 className="text-sm font-bold uppercase tracking-wider text-slate-800">Sessões</h2>
+            <h2 id="session-manager-title" className="text-sm font-bold uppercase tracking-wider text-slate-800">Sessões</h2>
           </div>
-          <button type="button" onClick={onClose} className="rounded p-1 text-slate-500 hover:bg-slate-100 hover:text-slate-900">
+          <button type="button" onClick={onClose} aria-label="Fechar sessões" className="rounded p-1 text-slate-500 hover:bg-slate-100 hover:text-slate-900">
             <X className="h-4 w-4" />
           </button>
         </header>
 
         <div className="space-y-4 p-5">
-          {error && <div className="rounded border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700">{error}</div>}
+          {error && <div role="alert" className="rounded border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700">{error}</div>}
           {toast && <div className="flex items-center gap-2 rounded border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-700"><CheckCircle2 className="h-3.5 w-3.5" />{toast}</div>}
 
           <div className="rounded border border-slate-300 bg-slate-50 p-3">
@@ -170,6 +175,7 @@ export default function SessionManager<TPayload>({
                 value={name}
                 onChange={(event) => setName(event.target.value)}
                 disabled={!canSave}
+                aria-label="Nome da sessão"
                 className="min-w-0 flex-1 rounded border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 disabled:bg-slate-100"
               />
               <button
@@ -218,7 +224,6 @@ export default function SessionManager<TPayload>({
             </div>
           </div>
         </div>
-      </section>
-    </div>
+    </Modal>
   );
 }

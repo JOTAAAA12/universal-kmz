@@ -1,4 +1,5 @@
 import { EnderecoConsulta, PointFeature } from './types';
+import { addressesLikelyEqual, normalizeStreetTokens, normalizeUf } from './addressNormalize';
 
 type AddressOrigin = NonNullable<PointFeature['origem_endereco']>;
 
@@ -25,14 +26,6 @@ export function resolveAddressOrigin(
   return fallback || 'Geocoding API';
 }
 
-export function normalizeAddressValue(value?: string): string {
-  return (value || '')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-zA-Z0-9]/g, '')
-    .toLowerCase();
-}
-
 function appendObservation(current: string, addition: string): string {
   if (!addition) return current;
   if (current.includes(addition)) return current;
@@ -41,6 +34,65 @@ function appendObservation(current: string, addition: string): string {
 
 function isExternalOrigin(origin: AddressOrigin): boolean {
   return origin === 'Geocoding API' || origin === 'Mocked';
+}
+
+type FormattedAddressTerritory = {
+  municipio?: string;
+  uf?: string;
+};
+
+function extractFormattedAddressTerritory(value: string): FormattedAddressTerritory {
+  const withoutCountry = value.replace(/(?:,\s*)?(?:brasil|brazil)\s*$/iu, '').trim();
+  const commaParts = withoutCountry.split(',').map(part => part.trim()).filter(Boolean);
+  const finalPart = commaParts[commaParts.length - 1] || '';
+  const dashParts = finalPart.split(/\s*[-–/]\s*/u).map(part => part.trim()).filter(Boolean);
+  const uf = normalizeUf(dashParts[dashParts.length - 1] || '');
+
+  if (!/^[A-Z]{2}$/.test(uf)) return {};
+
+  const municipio = dashParts.length > 1
+    ? dashParts[dashParts.length - 2]
+    : commaParts[commaParts.length - 2];
+  return { municipio, uf };
+}
+
+// Compara dois enderecos formatados apos canonizar a UF final (nome completo -> sigla) e
+// remover o pais. O resultado alimenta uma comparacao de equivalencia TOTAL de tokens: aqui
+// o endereco do KML e a unica copia do dado (trechos/poligonos nao guardam registro
+// "Original" separado), logo qualquer divergencia substantiva - numero, bairro, CEP,
+// municipio - precisa virar conflito em vez de ser absorvida por similaridade parcial.
+function canonicalAddressTokens(value: string): string[] {
+  const withoutCountry = value.replace(/(?:,\s*)?(?:brasil|brazil)\s*$/iu, '').trim();
+  const { uf } = extractFormattedAddressTerritory(value);
+  if (!uf) return normalizeStreetTokens(withoutCountry);
+
+  const separatorIndex = Math.max(
+    withoutCountry.lastIndexOf('-'),
+    withoutCountry.lastIndexOf('–'),
+    withoutCountry.lastIndexOf('/'),
+    withoutCountry.lastIndexOf(',')
+  );
+  const head = separatorIndex >= 0 ? withoutCountry.slice(0, separatorIndex) : withoutCountry;
+  return [...normalizeStreetTokens(head), uf.toLowerCase()];
+}
+
+function sameAddressTokens(left: string[], right: string[]): boolean {
+  const leftTokens = new Set(left);
+  const rightTokens = new Set(right);
+  return leftTokens.size === rightTokens.size && [...leftTokens].every(token => rightTokens.has(token));
+}
+
+function formattedAddressTerritoryConflicts(currentAddress: string, incoming: EnderecoConsulta): boolean {
+  const currentTerritory = extractFormattedAddressTerritory(currentAddress);
+  return Boolean(
+    currentTerritory.municipio
+    && incoming.municipio
+    && !addressesLikelyEqual(currentTerritory.municipio, incoming.municipio, 1)
+  ) || Boolean(
+    currentTerritory.uf
+    && incoming.uf
+    && currentTerritory.uf !== normalizeUf(incoming.uf)
+  );
 }
 
 export function buildPointAddressConflict(
@@ -55,9 +107,25 @@ export function buildPointAddressConflict(
   const incomingUf = incoming.uf || '';
 
   if (
+    point.logradouro
+    && incoming.logradouro
+    && !addressesLikelyEqual(point.logradouro, incoming.logradouro)
+  ) {
+    conflicts.push(`logradouro KML "${point.logradouro}" x ${incomingOrigin} "${incoming.logradouro}"`);
+  }
+
+  if (
+    point.bairro
+    && incoming.bairro
+    && !addressesLikelyEqual(point.bairro, incoming.bairro)
+  ) {
+    conflicts.push(`bairro KML "${point.bairro}" x ${incomingOrigin} "${incoming.bairro}"`);
+  }
+
+  if (
     point.municipio &&
     incomingMunicipio &&
-    normalizeAddressValue(point.municipio) !== normalizeAddressValue(incomingMunicipio)
+    !addressesLikelyEqual(point.municipio, incomingMunicipio, 1)
   ) {
     conflicts.push(`municipio KML "${point.municipio}" x ${incomingOrigin} "${incomingMunicipio}"`);
   }
@@ -65,7 +133,7 @@ export function buildPointAddressConflict(
   if (
     point.uf &&
     incomingUf &&
-    normalizeAddressValue(point.uf) !== normalizeAddressValue(incomingUf)
+    normalizeUf(point.uf) !== normalizeUf(incomingUf)
   ) {
     conflicts.push(`UF KML "${point.uf}" x ${incomingOrigin} "${incomingUf}"`);
   }
@@ -82,7 +150,8 @@ export function buildExistingAddressConflict(
   const incomingOrigin = resolveAddressOrigin(incoming);
   const incomingAddress = incoming.endereco_formatado || '';
   if (!currentAddress || !incomingAddress || !isExternalOrigin(incomingOrigin)) return '';
-  if (normalizeAddressValue(currentAddress) === normalizeAddressValue(incomingAddress)) return '';
+  if (!formattedAddressTerritoryConflicts(currentAddress, incoming)
+    && sameAddressTokens(canonicalAddressTokens(currentAddress), canonicalAddressTokens(incomingAddress))) return '';
 
   return `Conflito de endereco em ${label}: KML "${currentAddress}" x ${incomingOrigin} "${incomingAddress}". Dado do KML preservado; revisar geocodificacao.`;
 }

@@ -37,7 +37,7 @@ export interface CnefeIndexStats {
 
 export interface CnefeIndex {
   stats: CnefeIndexStats;
-  lookupNearest(lat: number, lng: number, maxDistanceMeters?: number): CnefeNearestMatch | null;
+  lookupNearest(lat: number, lng: number, maxDistanceMeters?: number): CnefeNearestMatch[];
 }
 
 export interface CnefeIndexOptions {
@@ -56,8 +56,11 @@ const DEFAULT_DIR = './dados/cnefe';
 const DEFAULT_MAX_ROWS = Number.MAX_SAFE_INTEGER;
 const DEFAULT_CELL_DEGREES = 0.001;
 const DEFAULT_MAX_DISTANCE_METERS = 150;
+const MAX_NEAREST_MATCHES = 5;
 const INGEST_BATCH_ROWS = 50000;
 const SQLITE_FILE_NAME = 'cnefe-index.sqlite';
+const META_CELL_DEGREES = 'index:cellDegrees';
+const META_ROW_COUNT = 'index:rowCount';
 const UF_BY_CODE: Record<string, string> = {
   '11': 'RO', '12': 'AC', '13': 'AM', '14': 'RR', '15': 'PA', '16': 'AP', '17': 'TO',
   '21': 'MA', '22': 'PI', '23': 'CE', '24': 'RN', '25': 'PB', '26': 'PE', '27': 'AL', '28': 'SE', '29': 'BA',
@@ -292,8 +295,10 @@ function initDatabase(db: DatabaseSync) {
       cell_lat INTEGER NOT NULL,
       cell_lng INTEGER NOT NULL
     );
-    CREATE INDEX IF NOT EXISTS idx_enderecos_cell ON enderecos(cell_lat, cell_lng);
+    DROP INDEX IF EXISTS idx_enderecos_cell;
+    CREATE INDEX IF NOT EXISTS idx_enderecos_cell_range ON enderecos(cell_lat, cell_lng, lat, lng);
     CREATE INDEX IF NOT EXISTS idx_enderecos_source ON enderecos(source);
+    CREATE INDEX IF NOT EXISTS idx_enderecos_uf ON enderecos(uf);
   `);
 }
 
@@ -323,9 +328,66 @@ function deleteFileMeta(db: DatabaseSync, source: string) {
   db.prepare('DELETE FROM meta WHERE chave = ?').run(metaKey(source));
 }
 
+function readMetaValue(db: DatabaseSync, key: string): string | null {
+  const row = db.prepare('SELECT valor FROM meta WHERE chave = ?').get(key) as { valor?: string } | undefined;
+  return typeof row?.valor === 'string' ? row.valor : null;
+}
+
+function writeMetaValue(db: DatabaseSync, key: string, value: string) {
+  db.prepare('INSERT OR REPLACE INTO meta(chave, valor) VALUES (?, ?)').run(key, value);
+}
+
 function countRows(db: DatabaseSync): number {
   const row = db.prepare('SELECT COUNT(*) AS total FROM enderecos').get() as { total: number };
   return Number(row.total || 0);
+}
+
+function readCachedRowCount(db: DatabaseSync): number | null {
+  const raw = readMetaValue(db, META_ROW_COUNT);
+  if (raw === null) return null;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function readIndexedRowCount(db: DatabaseSync): number {
+  const cached = readCachedRowCount(db);
+  if (cached !== null) return cached;
+  const counted = countRows(db);
+  writeMetaValue(db, META_ROW_COUNT, String(counted));
+  return counted;
+}
+
+function writeIndexedRowCount(db: DatabaseSync, rows: number) {
+  writeMetaValue(db, META_ROW_COUNT, String(Math.max(0, rows)));
+}
+
+function ensureCellDegrees(db: DatabaseSync, cellDegrees: number, messages: string[]): boolean {
+  const persisted = Number(readMetaValue(db, META_CELL_DEGREES));
+  if (persisted === cellDegrees) return false;
+
+  const hasRows = Boolean(db.prepare('SELECT 1 FROM enderecos LIMIT 1').get());
+  if (!hasRows) {
+    writeMetaValue(db, META_CELL_DEGREES, String(cellDegrees));
+    return false;
+  }
+
+  const recalculateCells = db.prepare(`
+    UPDATE enderecos
+    SET
+      cell_lat = CAST(lat / ? AS INTEGER) - CASE WHEN lat / ? < CAST(lat / ? AS INTEGER) THEN 1 ELSE 0 END,
+      cell_lng = CAST(lng / ? AS INTEGER) - CASE WHEN lng / ? < CAST(lng / ? AS INTEGER) THEN 1 ELSE 0 END
+  `);
+  db.exec('BEGIN TRANSACTION;');
+  try {
+    recalculateCells.run(cellDegrees, cellDegrees, cellDegrees, cellDegrees, cellDegrees, cellDegrees);
+    writeMetaValue(db, META_CELL_DEGREES, String(cellDegrees));
+    db.exec('COMMIT;');
+  } catch (error) {
+    db.exec('ROLLBACK;');
+    throw error;
+  }
+  messages.push('Grade CNEFE incompatível detectada; células recalculadas sem reingerir CSV.');
+  return true;
 }
 
 function sumSkippedRows(metas: Iterable<FileMeta>): number {
@@ -359,10 +421,11 @@ function rowToRecord(row: any): CnefeAddressRecord {
 
 class SqliteCnefeIndex implements CnefeIndex {
   readonly stats: CnefeIndexStats;
-  private readonly selectByCell = this.db.prepare(`
+  private readonly selectWithinCells = this.db.prepare(`
     SELECT id, lat, lng, logradouro, numero, bairro, municipio, uf, cep, municipio_resolvido
     FROM enderecos
-    WHERE cell_lat = ? AND cell_lng = ?
+    WHERE cell_lat BETWEEN ? AND ?
+      AND cell_lng BETWEEN ? AND ?
   `);
 
   constructor(stats: CnefeIndexStats, private readonly db: DatabaseSync, private readonly cellDegrees: number) {
@@ -373,27 +436,36 @@ class SqliteCnefeIndex implements CnefeIndex {
     this.db.close();
   }
 
-  lookupNearest(lat: number, lng: number, maxDistanceMeters = DEFAULT_MAX_DISTANCE_METERS): CnefeNearestMatch | null {
-    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  lookupNearest(lat: number, lng: number, maxDistanceMeters = DEFAULT_MAX_DISTANCE_METERS): CnefeNearestMatch[] {
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return [];
     const latCell = cellCoordinate(lat, this.cellDegrees);
     const lngCell = cellCoordinate(lng, this.cellDegrees);
     const metersPerCell = Math.max(1, this.cellDegrees * 111320);
     const radiusCells = Math.ceil(maxDistanceMeters / metersPerCell) + 1;
-    let best: CnefeNearestMatch | null = null;
+    const matches: CnefeNearestMatch[] = [];
 
-    for (let dLat = -radiusCells; dLat <= radiusCells; dLat++) {
-      for (let dLng = -radiusCells; dLng <= radiusCells; dLng++) {
-        const rows = this.selectByCell.all(latCell + dLat, lngCell + dLng) as any[];
-        for (const row of rows) {
-          const record = rowToRecord(row);
-          const distanceMeters = getDistanceMeters({ lat, lng }, { lat: record.lat, lng: record.lng });
-          if (distanceMeters <= maxDistanceMeters && (!best || distanceMeters < best.distanceMeters)) {
-            best = { record, distanceMeters };
-          }
+    for (const row of this.selectWithinCells.iterate(
+      latCell - radiusCells,
+      latCell + radiusCells,
+      lngCell - radiusCells,
+      lngCell + radiusCells
+    ) as Iterable<any>) {
+      const record = rowToRecord(row);
+      const distanceMeters = getDistanceMeters({ lat, lng }, { lat: record.lat, lng: record.lng });
+      if (distanceMeters <= maxDistanceMeters) {
+        const match = { record, distanceMeters };
+        const position = matches.findIndex(candidate => distanceMeters < candidate.distanceMeters);
+        if (position < 0) {
+          matches.push(match);
+        } else {
+          matches.splice(position, 0, match);
+        }
+        if (matches.length > MAX_NEAREST_MATCHES) {
+          matches.pop();
         }
       }
     }
-    return best;
+    return matches;
   }
 }
 
@@ -439,7 +511,8 @@ async function ingestFile(
   try {
     begin();
     // Clean up any orphaned rows from previous interrupted ingestion
-    db.prepare('DELETE FROM enderecos WHERE source = ?').run(file.path);
+    const removedRows = Number(db.prepare('DELETE FROM enderecos WHERE source = ?').run(file.path).changes || 0);
+    stats.indexedRows = Math.max(0, stats.indexedRows - removedRows);
     for await (const line of reader) {
       if (!line.trim()) continue;
       if (!columns) {
@@ -511,7 +584,7 @@ function reconcileRemovedAndChangedSources(
   files: CsvFile[],
   storedMeta: Map<string, FileMeta>,
   maxRows: number
-): CsvFile[] {
+): { filesToIngest: CsvFile[]; removedRows: number } {
   const currentPaths = new Set(files.map(file => file.path));
   const changedOrMissingSources = new Set<string>();
   const filesToIngest: CsvFile[] = [];
@@ -526,8 +599,9 @@ function reconcileRemovedAndChangedSources(
   }
 
   const deleteRows = db.prepare('DELETE FROM enderecos WHERE source = ?');
+  let removedRows = 0;
   for (const source of changedOrMissingSources) {
-    deleteRows.run(source);
+    removedRows += Number(deleteRows.run(source).changes || 0);
     deleteFileMeta(db, source);
     storedMeta.delete(source);
   }
@@ -537,13 +611,20 @@ function reconcileRemovedAndChangedSources(
       filesToIngest.push(file);
     }
   }
-  return filesToIngest;
+  return { filesToIngest, removedRows };
+}
+
+function hasOrphanedRowsForUntrackedSources(db: DatabaseSync, filesToIngest: CsvFile[], storedMeta: Map<string, FileMeta>): boolean {
+  const findRowsForSource = db.prepare('SELECT 1 FROM enderecos WHERE source = ? LIMIT 1');
+  return filesToIngest.some(file => !storedMeta.has(file.path) && Boolean(findRowsForSource.get(file.path)));
 }
 
 export async function loadCnefeIndex(options: CnefeIndexOptions = {}): Promise<CnefeIndex> {
   const dir = resolveCnefeDir(options.dir);
   const maxRows = parsePositiveInt(options.maxRows ?? process.env.CNEFE_MAX_ROWS, DEFAULT_MAX_ROWS);
-  const cellDegrees = options.cellDegrees || DEFAULT_CELL_DEGREES;
+  const cellDegrees = Number.isFinite(options.cellDegrees) && (options.cellDegrees as number) > 0
+    ? options.cellDegrees as number
+    : DEFAULT_CELL_DEGREES;
   const stats: CnefeIndexStats = {
     dir,
     files: 0,
@@ -563,8 +644,15 @@ export async function loadCnefeIndex(options: CnefeIndexOptions = {}): Promise<C
   initDatabase(db);
 
   const storedMeta = readFileMeta(db);
-  const filesToIngest = reconcileRemovedAndChangedSources(db, files, storedMeta, maxRows);
-  stats.indexedRows = countRows(db);
+  const indexedRowsBeforeReconciliation = readIndexedRowCount(db);
+  const reconciliation = reconcileRemovedAndChangedSources(db, files, storedMeta, maxRows);
+  const filesToIngest = reconciliation.filesToIngest;
+  const recalculatedCells = ensureCellDegrees(db, cellDegrees, stats.messages);
+  stats.indexedRows = Math.max(0, indexedRowsBeforeReconciliation - reconciliation.removedRows);
+  if (hasOrphanedRowsForUntrackedSources(db, filesToIngest, storedMeta)) {
+    stats.indexedRows = countRows(db);
+  }
+  writeIndexedRowCount(db, stats.indexedRows);
   stats.skippedRows = sumSkippedRows(readFileMeta(db).values());
   stats.partial = [...readFileMeta(db).values()].some(meta => meta.partial);
   notifyProgress(stats, options.onProgress);
@@ -583,10 +671,10 @@ export async function loadCnefeIndex(options: CnefeIndexOptions = {}): Promise<C
 
   if (files.length === 0) {
     stats.messages.push('Nenhum CSV CNEFE carregado.');
-  } else if (filesToIngest.length === 0 && stats.indexedRows > 0) {
+  } else if (filesToIngest.length === 0 && stats.indexedRows > 0 && !recalculatedCells) {
     stats.messages.push('Índice CNEFE SQLite reaberto sem reindexação.');
   }
-  stats.indexedRows = countRows(db);
+  writeIndexedRowCount(db, stats.indexedRows);
   const finalMeta = readFileMeta(db);
   stats.skippedRows = sumSkippedRows(finalMeta.values());
   stats.partial = [...finalMeta.values()].some(meta => meta.partial);
@@ -614,16 +702,31 @@ export async function getCnefeIndexedUfStats(dirInput?: string): Promise<CnefeIn
   const db = new DatabaseSync(dbPath);
   try {
     initDatabase(db);
-    const byUf = new Map<string, CnefeIndexedUfStats>();
-    for (const [source, meta] of readFileMeta(db)) {
-      const uf = deriveUfFromFile(path.basename(source));
-      if (!uf) continue;
-      const current = byUf.get(uf) || { uf, rows: 0, sources: [] };
-      current.rows += meta.rows || 0;
-      current.sources.push(source);
-      byUf.set(uf, current);
+    const rowsByUf = db.prepare(`
+      SELECT uf, COUNT(*) AS rows
+      FROM enderecos
+      WHERE TRIM(uf) <> ''
+      GROUP BY uf
+      ORDER BY uf
+    `).all() as Array<{ uf: string; rows: number }>;
+    const sourcesByUf = new Map<string, string[]>();
+    const sourceRows = db.prepare(`
+      SELECT uf, source
+      FROM enderecos
+      WHERE TRIM(uf) <> ''
+      GROUP BY uf, source
+      ORDER BY uf, source
+    `).all() as Array<{ uf: string; source: string }>;
+    for (const row of sourceRows) {
+      const sources = sourcesByUf.get(row.uf) || [];
+      sources.push(row.source);
+      sourcesByUf.set(row.uf, sources);
     }
-    return [...byUf.values()].sort((a, b) => a.uf.localeCompare(b.uf));
+    return rowsByUf.map(row => ({
+      uf: row.uf,
+      rows: Number(row.rows || 0),
+      sources: sourcesByUf.get(row.uf) || []
+    }));
   } finally {
     db.close();
   }
@@ -634,34 +737,83 @@ export async function removeCnefeUf(ufInput: string, dirInput?: string): Promise
   const dir = resolveCnefeDir(dirInput);
   await mkdir(dir, { recursive: true });
   const dbPath = path.join(dir, SQLITE_FILE_NAME);
+  const files = await listCsvFiles(dir, []);
   const db = new DatabaseSync(dbPath);
   let removedRows = 0;
-  const sources = new Set<string>();
+  const sourcesToDelete = new Set<string>();
 
   try {
     initDatabase(db);
-    for (const [source, meta] of readFileMeta(db)) {
-      if (matchesUfSource(source, uf)) {
-        removedRows += meta.rows || 0;
-        sources.add(source);
+    const storedMeta = readFileMeta(db);
+    const targetRowsBySource = db.prepare(`
+      SELECT source, COUNT(*) AS rows
+      FROM enderecos
+      WHERE uf = ?
+      GROUP BY source
+    `).all(uf) as Array<{ source: string; rows: number }>;
+    const hasOtherUfInSource = db.prepare(`
+      SELECT 1
+      FROM enderecos
+      WHERE source = ? AND TRIM(uf) <> '' AND uf <> ?
+      LIMIT 1
+    `);
+    const hasKnownUfInSource = db.prepare(`
+      SELECT 1
+      FROM enderecos
+      WHERE source = ? AND TRIM(uf) <> ''
+      LIMIT 1
+    `);
+
+    for (const row of targetRowsBySource) {
+      if (!hasOtherUfInSource.get(row.source, uf)) {
+        sourcesToDelete.add(row.source);
       }
     }
-    const deleteRows = db.prepare('DELETE FROM enderecos WHERE source = ?');
-    for (const source of sources) {
-      deleteRows.run(source);
-      deleteFileMeta(db, source);
+
+    for (const [source] of storedMeta) {
+      if (matchesUfSource(source, uf) && !hasKnownUfInSource.get(source)) {
+        sourcesToDelete.add(source);
+      }
+    }
+    for (const file of files) {
+      if (matchesUfSource(file.path, uf) && !hasKnownUfInSource.get(file.path)) {
+        sourcesToDelete.add(file.path);
+      }
+    }
+
+    const cachedRows = readCachedRowCount(db);
+    const deleteRowsByUf = db.prepare('DELETE FROM enderecos WHERE uf = ?');
+    const deleteRowsBySource = db.prepare('DELETE FROM enderecos WHERE source = ?');
+    db.exec('BEGIN TRANSACTION;');
+    try {
+      removedRows += Number(deleteRowsByUf.run(uf).changes || 0);
+      for (const source of sourcesToDelete) {
+        removedRows += Number(deleteRowsBySource.run(source).changes || 0);
+        deleteFileMeta(db, source);
+      }
+      for (const row of targetRowsBySource) {
+        if (sourcesToDelete.has(row.source)) continue;
+        const meta = storedMeta.get(row.source);
+        if (meta) {
+          writeFileMeta(db, { ...meta, rows: Math.max(0, meta.rows - Number(row.rows || 0)) });
+        }
+      }
+      if (cachedRows === null) {
+        writeIndexedRowCount(db, countRows(db));
+      } else {
+        writeIndexedRowCount(db, cachedRows - removedRows);
+      }
+      db.exec('COMMIT;');
+    } catch (error) {
+      db.exec('ROLLBACK;');
+      throw error;
     }
   } finally {
     db.close();
   }
 
-  const files = await listCsvFiles(dir, []);
-  for (const file of files) {
-    if (matchesUfSource(file.path, uf)) sources.add(file.path);
-  }
-
   let removedFiles = 0;
-  for (const source of sources) {
+  for (const source of sourcesToDelete) {
     try {
       await unlink(source);
       removedFiles++;

@@ -1,4 +1,5 @@
 import { calculateCentroid, getDistanceMeters } from './kmlParser';
+import { normalizeStreetTokens } from './addressNormalize';
 import { Coordinate, EnderecoConsulta, EnderecoPoligono, TrechoEndereco } from './types';
 
 const DEFAULT_STEP_METERS = 100;
@@ -91,7 +92,7 @@ function normalizeText(value?: string): string {
 }
 
 function streetKey(endereco: EnderecoConsulta): string {
-  const normalized = normalizeText(endereco.logradouro);
+  const normalized = normalizeStreetTokens(endereco.logradouro || '').join(' ');
   return normalized || UNKNOWN_LOGRADOURO;
 }
 

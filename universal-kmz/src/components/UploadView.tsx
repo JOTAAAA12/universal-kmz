@@ -215,12 +215,29 @@ export default function UploadView({
       </div>
 
       {/* Main Drag Sandbox */}
+      <input
+        type="file"
+        ref={fileInputRef}
+        onChange={handleFileInput}
+        accept=".kml,.kmz"
+        aria-label="Selecionar arquivo KML ou KMZ"
+        className="sr-only"
+      />
       <div
+        role="button"
+        tabIndex={0}
         onDragEnter={handleDrag}
         onDragOver={handleDrag}
         onDragLeave={handleDrag}
         onDrop={handleDrop}
         onClick={() => fileInputRef.current?.click()}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            fileInputRef.current?.click();
+          }
+        }}
+        aria-label="Selecionar arquivo KML ou KMZ"
         className={`relative border border-dashed rounded p-8 md:p-12 text-center cursor-pointer transition duration-200 flex flex-col items-center justify-center space-y-4 ${
           isDragActive 
             ? 'border-indigo-600 bg-indigo-50/50' 
@@ -228,14 +245,6 @@ export default function UploadView({
         }`}
         id="drag-and-drop-container"
       >
-        <input
-          type="file"
-          ref={fileInputRef}
-          onChange={handleFileInput}
-          accept=".kml,.kmz"
-          className="hidden"
-        />
-
         {isReadingFile ? (
           <div className="space-y-3 flex flex-col items-center animate-fade-in">
             <div className="bg-indigo-50 text-indigo-600 p-4 rounded-full border border-indigo-200">
@@ -402,7 +411,7 @@ export default function UploadView({
 
       {/* Technical Errors */}
       {errorMsg && (
-        <span className="block text-center text-rose-600 text-xs font-mono font-bold bg-rose-50 border border-rose-200 p-3 rounded max-w-lg mx-auto whitespace-pre-line select-text" id="error-message-label">
+        <span role="alert" className="block text-center text-rose-600 text-xs font-mono font-bold bg-rose-50 border border-rose-200 p-3 rounded max-w-lg mx-auto whitespace-pre-line select-text" id="error-message-label">
           {errorMsg}
         </span>
       )}

@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { ArrowDown, ArrowUp, CheckCircle2, Database, Eye, EyeOff, KeyRound, Loader2, Save, Settings, X, XCircle } from 'lucide-react';
 
 import CnefeManager from './CnefeManager';
+import Modal from './Modal';
 
 const KEEP_SECRET = '__KEEP__';
 const PROVIDERS = ['google', 'locationiq', 'geoapify', 'nominatim', 'photon', 'bigdatacloud', 'cnefe', 'mock'];
@@ -55,6 +56,7 @@ function SecretField({ label, value, placeholder, visible, onToggleVisible, onCh
           type="button"
           onClick={onToggleVisible}
           className="border-l border-slate-300 px-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"
+          aria-label={visible ? `Ocultar ${label}` : `Mostrar ${label}`}
           title={visible ? 'Ocultar chave' : 'Mostrar chave'}
         >
           {visible ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
@@ -195,14 +197,18 @@ export default function SettingsPanel({
   };
 
   return (
-    <div className="fixed inset-0 z-[80] flex items-start justify-center bg-slate-950/40 p-4 backdrop-blur-sm md:items-center">
-      <section className="max-h-[92vh] w-full max-w-4xl overflow-y-auto rounded border border-slate-300 bg-white shadow-xl">
+    <Modal
+      onClose={onClose}
+      titleId="settings-panel-title"
+      backdropClassName="fixed inset-0 z-[80] flex items-start justify-center bg-slate-950/40 p-4 backdrop-blur-sm md:items-center"
+      dialogClassName="max-h-[92vh] w-full max-w-4xl overflow-y-auto rounded border border-slate-300 bg-white shadow-xl"
+    >
         <header className="sticky top-0 z-10 flex items-center justify-between border-b border-slate-300 bg-white px-5 py-4">
           <div className="flex items-center gap-2">
             <Settings className="h-4 w-4 text-indigo-600" />
-            <h2 className="text-sm font-bold uppercase tracking-wider text-slate-800">Configurações</h2>
+            <h2 id="settings-panel-title" className="text-sm font-bold uppercase tracking-wider text-slate-800">Configurações</h2>
           </div>
-          <button type="button" onClick={onClose} className="rounded p-1 text-slate-500 hover:bg-slate-100 hover:text-slate-900">
+          <button type="button" onClick={onClose} aria-label="Fechar configurações" className="rounded p-1 text-slate-500 hover:bg-slate-100 hover:text-slate-900">
             <X className="h-4 w-4" />
           </button>
         </header>
@@ -232,7 +238,7 @@ export default function SettingsPanel({
           {activeTab === 'apis' && (
             <>
           {loading && <div className="text-xs font-semibold text-slate-500">Carregando configuração...</div>}
-          {error && <div className="rounded border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700">{error}</div>}
+          {error && <div role="alert" className="rounded border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700">{error}</div>}
           {toast && <div className="rounded border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-700">{toast}</div>}
 
           <div className="grid gap-4 md:grid-cols-3">
@@ -261,10 +267,10 @@ export default function SettingsPanel({
                   const result = testResults[provider];
                   return (
                     <div key={provider} className="flex flex-wrap items-center gap-2 rounded border border-slate-200 bg-white px-3 py-2">
-                      <input type="checkbox" checked={enabled} onChange={() => toggleProvider(provider)} className="h-4 w-4 accent-indigo-600" />
+                      <input type="checkbox" checked={enabled} onChange={() => toggleProvider(provider)} aria-label={`Ativar ${provider}`} className="h-4 w-4 accent-indigo-600" />
                       <span className="min-w-24 flex-1 font-mono text-xs font-bold uppercase text-slate-700">{provider}</span>
-                      <button type="button" disabled={!enabled} onClick={() => moveProvider(provider, -1)} className="rounded border border-slate-200 p-1 text-slate-500 disabled:opacity-30" title="Subir"><ArrowUp className="h-3.5 w-3.5" /></button>
-                      <button type="button" disabled={!enabled} onClick={() => moveProvider(provider, 1)} className="rounded border border-slate-200 p-1 text-slate-500 disabled:opacity-30" title="Descer"><ArrowDown className="h-3.5 w-3.5" /></button>
+                      <button type="button" disabled={!enabled} onClick={() => moveProvider(provider, -1)} aria-label={`Mover ${provider} para cima`} className="rounded border border-slate-200 p-1 text-slate-500 disabled:opacity-30" title="Subir"><ArrowUp className="h-3.5 w-3.5" /></button>
+                      <button type="button" disabled={!enabled} onClick={() => moveProvider(provider, 1)} aria-label={`Mover ${provider} para baixo`} className="rounded border border-slate-200 p-1 text-slate-500 disabled:opacity-30" title="Descer"><ArrowDown className="h-3.5 w-3.5" /></button>
                       <button type="button" onClick={() => testProvider(provider)} disabled={testing === provider} className="inline-flex items-center gap-1 rounded border border-indigo-200 bg-indigo-50 px-2 py-1 text-[10px] font-bold uppercase text-indigo-700 disabled:opacity-60">
                         {testing === provider && <Loader2 className="h-3 w-3 animate-spin" />}
                         Testar
@@ -302,7 +308,6 @@ export default function SettingsPanel({
             Salvar
           </button>
         </footer>}
-      </section>
-    </div>
+    </Modal>
   );
 }

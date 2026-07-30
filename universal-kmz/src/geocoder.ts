@@ -1,5 +1,5 @@
 import { EnderecoConsulta } from './types';
-import { normalizeAddressValue } from './addressConfidence';
+import { addressesLikelyEqual, normalizeUf } from './addressNormalize';
 import { getDistanceMeters } from './kmlParser';
 import { bigDataCloudProvider } from './providers/bigdatacloud';
 import { cnefeProvider } from './providers/cnefe';
@@ -349,13 +349,16 @@ function shouldCrossCheck(item: EnderecoConsulta, env: NodeJS.ProcessEnv): boole
 }
 
 function providersAgree(primary: EnderecoConsulta, secondary: EnderecoConsulta): boolean {
-  const primaryStreet = normalizeAddressValue(primary.logradouro);
-  const secondaryStreet = normalizeAddressValue(secondary.logradouro);
-  const primaryCity = normalizeAddressValue(primary.municipio);
-  const secondaryCity = normalizeAddressValue(secondary.municipio);
+  const primaryStreet = primary.logradouro || '';
+  const secondaryStreet = secondary.logradouro || '';
+  const primaryCity = primary.municipio || '';
+  const secondaryCity = secondary.municipio || '';
+  const primaryUf = primary.uf ? normalizeUf(primary.uf) : '';
+  const secondaryUf = secondary.uf ? normalizeUf(secondary.uf) : '';
   return Boolean(primaryStreet && secondaryStreet && primaryCity && secondaryCity
-    && primaryStreet === secondaryStreet
-    && primaryCity === secondaryCity);
+    && addressesLikelyEqual(primaryStreet, secondaryStreet)
+    && addressesLikelyEqual(primaryCity, secondaryCity, 1)
+    && (!primaryUf || !secondaryUf || primaryUf === secondaryUf));
 }
 
 async function maybeCrossCheckResult(

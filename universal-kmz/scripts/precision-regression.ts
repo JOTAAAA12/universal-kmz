@@ -1,9 +1,16 @@
 import assert from 'node:assert/strict';
 
-import { mergeExternalAddressRecord, mergePointWithGeocodedAddress } from '../src/addressConfidence';
+import {
+  buildExistingAddressConflict,
+  buildPointAddressConflict,
+  mergeExternalAddressRecord,
+  mergePointWithGeocodedAddress
+} from '../src/addressConfidence';
+import { addressesLikelyEqual, normalizeStreetTokens, normalizeUf } from '../src/addressNormalize';
 import { generateKml } from '../src/exporters';
 import { geocodeReverse, resolveGeocodeMode } from '../src/geocoder';
 import { getSha256, parseKmlStringToResult } from '../src/kmlParser';
+import { consolidateSegments } from '../src/lineSampling';
 import { EnderecoConsulta } from '../src/types';
 
 function parseFixture(name: string, kml: string) {
@@ -125,6 +132,174 @@ assert.equal(mergedCnefeMismatch.status_api, 'SUCESSO');
 assert.equal(mergedCnefeMismatch.necessita_revisao, true, 'CNEFE conflict should flag for review');
 assert.match(mergedCnefeMismatch.conflito_endereco || '', /CidadeDoArquivo/, 'Conflict note should mention original city');
 assert.match(mergedCnefeMismatch.conflito_endereco || '', /AlgumaOutraCidade/, 'Conflict note should mention CNEFE city');
+
+assert.deepEqual(normalizeStreetTokens('R Sete de Setembro'), ['rua', '7', 'setembro']);
+assert.equal(addressesLikelyEqual('Av. Brasil', 'Avenida Brasil'), true);
+assert.equal(addressesLikelyEqual('R Sete de Setembro', 'Rua 7 de Setembro'), true);
+assert.equal(addressesLikelyEqual('São João Batista', 'São João Batista do Glória', 1), false);
+assert.equal(normalizeUf('SP'), 'SP');
+assert.equal(normalizeUf('São Paulo'), 'SP');
+
+const normalizedKmlPoint = {
+  ...withCity.pontos[0],
+  logradouro: 'Av. Brasil',
+  bairro: 'Jardim de Setembro',
+  municipio: 'São Paulo',
+  uf: 'SP'
+};
+const normalizedExternalAddress: EnderecoConsulta = {
+  ...externalMismatch,
+  endereco_formatado: 'Avenida Brasil, 123 - Jardim Setembro, Sao Paulo - São Paulo, Brasil',
+  logradouro: 'Avenida Brasil',
+  bairro: 'Jardim Setembro',
+  municipio: 'Sao Paulo',
+  uf: 'São Paulo'
+};
+
+assert.equal(buildPointAddressConflict(normalizedKmlPoint, normalizedExternalAddress), '');
+assert.equal(
+  buildExistingAddressConflict(
+    'Av. Brasil, 123 - Jardim de Setembro, São Paulo - SP, Brasil',
+    normalizedExternalAddress,
+    'Ponto normalizado'
+  ),
+  ''
+);
+assert.equal(
+  buildExistingAddressConflict(
+    'R Sete de Setembro, 10 - Centro, São Paulo - SP, Brasil',
+    {
+      ...normalizedExternalAddress,
+      endereco_formatado: 'Rua 7 de Setembro, 10 - Centro, Sao Paulo - SP, Brasil',
+      logradouro: 'Rua 7 de Setembro',
+      bairro: 'Centro',
+      uf: 'SP'
+    },
+    'Trecho normalizado'
+  ),
+  ''
+);
+
+const normalizedSegments = consolidateSegments([
+  { coord: { lat: -23.55, lng: -46.63 }, endereco: normalizedExternalAddress },
+  {
+    coord: { lat: -23.551, lng: -46.631 },
+    endereco: { ...normalizedExternalAddress, logradouro: 'Av. Brasil' }
+  }
+]);
+assert.equal(normalizedSegments.length, 1, 'Street abbreviations should form one segment');
+
+// O normalizador nao pode fundir logradouros realmente distintos no mesmo trecho.
+const distinctStreetSegments = consolidateSegments([
+  { coord: { lat: -23.55, lng: -46.63 }, endereco: { ...normalizedExternalAddress, logradouro: 'Rua Quinze de Novembro' } },
+  { coord: { lat: -23.551, lng: -46.631 }, endereco: { ...normalizedExternalAddress, logradouro: 'Rua Quinze de Marco' } },
+  { coord: { lat: -23.552, lng: -46.632 }, endereco: { ...normalizedExternalAddress, logradouro: 'Avenida Brasil Sul' } },
+  { coord: { lat: -23.553, lng: -46.633 }, endereco: { ...normalizedExternalAddress, logradouro: 'Avenida Brasil Norte' } }
+]);
+assert.equal(distinctStreetSegments.length, 4, 'Logradouros distintos nao podem ser fundidos no mesmo trecho');
+
+const realMunicipalityConflict = buildPointAddressConflict(
+  { ...normalizedKmlPoint, municipio: 'Campinas' },
+  { ...normalizedExternalAddress, municipio: 'Santos', uf: 'SP' }
+);
+assert.match(realMunicipalityConflict, /Campinas/);
+assert.match(realMunicipalityConflict, /Santos/);
+
+const containedMunicipalityConflict = buildPointAddressConflict(
+  { ...normalizedKmlPoint, municipio: 'São João Batista', uf: 'MG' },
+  { ...normalizedExternalAddress, municipio: 'São João Batista do Glória', uf: 'MG' }
+);
+assert.match(containedMunicipalityConflict, /São João Batista/);
+assert.match(containedMunicipalityConflict, /Glória/);
+
+assert.match(
+  buildExistingAddressConflict(
+    'Rua A, 1 - Centro, Campinas - SP, Brasil',
+    {
+      ...normalizedExternalAddress,
+      endereco_formatado: 'Rua A, 1 - Centro, Santos - SP, Brasil',
+      logradouro: 'Rua A',
+      bairro: 'Centro',
+      municipio: 'Santos',
+      uf: 'SP'
+    },
+    'Municipio divergente'
+  ),
+  /Conflito de endereco/
+);
+assert.match(
+  buildExistingAddressConflict(
+    'Rua A, 1 - Centro, Campinas/SP, Brasil',
+    {
+      ...normalizedExternalAddress,
+      endereco_formatado: 'Rua A, 1 - Centro, Santos/SP, Brazil',
+      logradouro: 'Rua A',
+      bairro: 'Centro',
+      municipio: 'Santos',
+      uf: 'SP'
+    },
+    'Municipio divergente com barra'
+  ),
+  /Conflito de endereco/
+);
+assert.match(
+  buildExistingAddressConflict(
+    'Rua A, 1 - Centro, São João Batista - MG, Brasil',
+    {
+      ...normalizedExternalAddress,
+      endereco_formatado: 'Rua A, 1 - Centro, São João Batista do Glória - MG, Brasil',
+      logradouro: 'Rua A',
+      bairro: 'Centro',
+      municipio: 'São João Batista do Glória',
+      uf: 'MG'
+    },
+    'Municipio com nome contido'
+  ),
+  /Conflito de endereco/
+);
+
+const realUfConflict = buildPointAddressConflict(
+  normalizedKmlPoint,
+  { ...normalizedExternalAddress, uf: 'Rio de Janeiro' }
+);
+assert.match(realUfConflict, /UF KML "SP"/);
+assert.match(realUfConflict, /Rio de Janeiro/);
+assert.match(
+  buildExistingAddressConflict(
+    'Rua A, 1 - Centro, Campinas - SP, Brasil',
+    {
+      ...normalizedExternalAddress,
+      endereco_formatado: 'Rua A, 1 - Centro, Campinas - Rio de Janeiro, Brasil',
+      logradouro: 'Rua A',
+      bairro: 'Centro',
+      municipio: 'Campinas',
+      uf: 'Rio de Janeiro'
+    },
+    'UF divergente'
+  ),
+  /Conflito de endereco/
+);
+
+// Invariante pericial: o endereco formatado do KML e a unica copia do dado em
+// trechos/poligonos, logo divergencia substantiva (numero, bairro, CEP) tem de virar
+// conflito - similaridade parcial nao pode autorizar a sobrescrita pelo dado externo.
+const substantiveDivergences: [string, string, string][] = [
+  ['numero', 'Rua das Flores, 100 - Centro, São Paulo - SP, Brasil', 'Rua das Flores, 250 - Centro, São Paulo - SP, Brasil'],
+  ['bairro', 'Rua das Flores, 100 - Centro, São Paulo - SP, Brasil', 'Rua das Flores, 100 - Jardins, São Paulo - SP, Brasil'],
+  ['cep', 'Rua das Flores, 100 - Centro, São Paulo - SP, 01000-000', 'Rua das Flores, 100 - Centro, São Paulo - SP, 09999-111'],
+  ['numero ausente no externo', 'Rua das Flores, 100 - Centro, São Paulo - SP, Brasil', 'Rua das Flores - Centro, São Paulo - SP, Brasil']
+];
+for (const [campo, kmlAddress, externalAddress] of substantiveDivergences) {
+  assert.match(
+    buildExistingAddressConflict(
+      kmlAddress,
+      { ...normalizedExternalAddress, endereco_formatado: externalAddress, municipio: 'São Paulo', uf: 'SP' },
+      `divergencia de ${campo}`
+    ),
+    /Conflito de endereco/,
+    `divergencia de ${campo} deve gerar conflito e preservar o endereco do KML`
+  );
+}
 
 const lineOnly = parseFixture('linha.kml', `<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">

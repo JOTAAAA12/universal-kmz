@@ -25,7 +25,8 @@
     "test:config": "tsx scripts/config-and-sessions-regression.ts",
     "test:pericial:parse": "tsx scripts/harness/pericial-parse-contract.ts",
     "test:pericial:export": "tsx scripts/harness/pericial-export-contract.ts",
-    "test:pericial": "npm.cmd run test:pericial:parse && npm.cmd run test:pericial:export"
+    "test:pericial:merge": "tsx scripts/pericial-merge-regression.ts",
+    "test:pericial": "npm.cmd run test:pericial:parse && npm.cmd run test:pericial:export && npm.cmd run test:pericial:merge"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
