@@ -46,6 +46,9 @@ const addressCache: CachedEnderecoConsulta[] = [];
 const MAX_ADDRESS_CACHE_ITEMS = 1000;
 const REQUEST_TIMEOUT_MS = 10000;
 const PROVIDER_COOLDOWN_MS = 60000;
+const PROVIDER_MAX_ATTEMPTS = 3;
+const PROVIDER_RETRY_BASE_DELAY_MS = 250;
+const PROVIDER_RETRY_MAX_DELAY_MS = 4000;
 const DEFAULT_CHAIN = ['google', 'nominatim', 'photon', 'bigdatacloud'];
 
 const OPERATIONAL_FAILURE_STATUSES = new Set([
@@ -72,6 +75,7 @@ const BUILT_IN_PROVIDERS: Record<string, GeocodeProvider> = {
 
 const providerUsage = new Map<string, number>();
 const providerCooldownUntil = new Map<string, number>();
+const inFlightGeocodeRequests = new Map<string, Promise<EnderecoConsulta>>();
 
 export function isOperationalGeocodeFailureStatus(status?: string): boolean {
   return OPERATIONAL_FAILURE_STATUSES.has(status || '');
@@ -204,12 +208,116 @@ function isCoolingDown(providerName: string, now = Date.now()): boolean {
   return (providerCooldownUntil.get(providerName) || 0) > now;
 }
 
-function markCooldown(providerName: string, now = Date.now()) {
-  providerCooldownUntil.set(providerName, now + PROVIDER_COOLDOWN_MS);
+function markCooldown(providerName: string, result?: EnderecoConsulta, now = Date.now()) {
+  providerCooldownUntil.set(providerName, now + (getRetryAfterMs(result, now) ?? PROVIDER_COOLDOWN_MS));
 }
 
 function incrementUsage(providerName: string) {
   providerUsage.set(providerName, (providerUsage.get(providerName) || 0) + 1);
+}
+
+function getRetryAfterMs(result: EnderecoConsulta | undefined, now = Date.now()): number | null {
+  if (!result) return null;
+
+  const metadata = result as EnderecoConsulta & {
+    retryAfter?: string | number;
+    retry_after?: string | number;
+    responseHeaders?: Record<string, string | undefined>;
+    response_headers?: Record<string, string | undefined>;
+  };
+  const explicitRetryAfter = metadata.retryAfter
+    ?? metadata.retry_after
+    ?? metadata.responseHeaders?.['retry-after']
+    ?? metadata.responseHeaders?.['Retry-After']
+    ?? metadata.response_headers?.['retry-after']
+    ?? metadata.response_headers?.['Retry-After'];
+  const errorRetryAfter = result.provider_error_message?.match(
+    /retry[-_ ]?after\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)/i
+  )?.[1] ?? result.provider_error_message?.match(/retry[-_ ]?after\s*[:=]\s*([^;|]+)/i)?.[1];
+  const retryAfter = explicitRetryAfter ?? errorRetryAfter;
+  if (retryAfter === undefined) return null;
+
+  const seconds = typeof retryAfter === 'number' ? retryAfter : Number(retryAfter.trim());
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.round(seconds * 1000);
+  }
+
+  const retryAt = Date.parse(String(retryAfter));
+  return Number.isFinite(retryAt) ? Math.max(0, retryAt - now) : null;
+}
+
+function getRetryDelayMs(attempt: number): number {
+  const exponentialDelay = Math.min(
+    PROVIDER_RETRY_MAX_DELAY_MS,
+    PROVIDER_RETRY_BASE_DELAY_MS * (2 ** attempt)
+  );
+  const jitter = Math.floor(Math.random() * Math.max(1, Math.floor(exponentialDelay * 0.25)));
+  return exponentialDelay + jitter;
+}
+
+function waitForRetry(delayMs: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, delayMs));
+}
+
+function buildProviderFailure(
+  provider: GeocodeProvider,
+  request: GeocodeProviderRequest,
+  error: unknown
+): EnderecoConsulta {
+  const message = error instanceof Error ? error.message : 'Falha inesperada ao consultar o provedor.';
+  return buildGeocodeRecord(request.lat, request.lng, {
+    status_api: 'FALHA',
+    provider_status: 'REQUEST_ERROR',
+    provider_error_message: message,
+    endereco_formatado: `Falha temporária no provedor ${provider.name}.`,
+    fonte: provider.name,
+    retryable: true
+  });
+}
+
+async function reverseProviderWithRetry(
+  provider: GeocodeProvider,
+  request: GeocodeProviderRequest
+): Promise<EnderecoConsulta> {
+  let lastResult: EnderecoConsulta | null = null;
+
+  for (let attempt = 0; attempt < PROVIDER_MAX_ATTEMPTS; attempt++) {
+    incrementUsage(provider.name);
+    let result: EnderecoConsulta;
+    try {
+      result = await provider.reverse(request);
+    } catch (error: unknown) {
+      result = buildProviderFailure(provider, request, error);
+    }
+
+    if (!isRetryableProviderResult(result)) {
+      return result;
+    }
+
+    lastResult = result;
+    if (attempt < PROVIDER_MAX_ATTEMPTS - 1) {
+      await waitForRetry(getRetryDelayMs(attempt));
+    }
+  }
+
+  const failure = lastResult || buildProviderFailure(provider, request, new Error('Falha sem resposta do provedor.'));
+  markCooldown(provider.name, failure);
+  return failure;
+}
+
+function buildInFlightKey(
+  request: GeocodeProviderRequest,
+  providers: GeocodeProvider[]
+): string {
+  return [
+    request.lat.toFixed(7),
+    request.lng.toFixed(7),
+    request.language,
+    request.region,
+    request.allowMock ? 'mock' : 'real',
+    request.timeoutMs,
+    providers.map(provider => provider.name).join(',')
+  ].join('|');
 }
 
 export function getGeocoderProviderByName(name: string): GeocodeProvider | null {
@@ -265,11 +373,7 @@ async function maybeCrossCheckResult(
     if (!provider.isEnabled(request) || isCoolingDown(provider.name)) {
       continue;
     }
-    incrementUsage(provider.name);
-    const comparison = await provider.reverse(request);
-    if (isRetryableProviderResult(comparison)) {
-      markCooldown(provider.name);
-    }
+    const comparison = await reverseProviderWithRetry(provider, request);
     if (!isSuccessResult(comparison)) {
       return result;
     }
@@ -363,7 +467,31 @@ export async function geocodeReverse(
 
   const request = buildRequest(lat, lng, apiKey, language, region, options);
   const providers = getProviderCandidates(request, options);
+  const inFlightKey = buildInFlightKey(request, providers);
+  const inFlight = inFlightGeocodeRequests.get(inFlightKey);
+  // Cada chamador recebe seu próprio registro: antes da deduplicação cada chamada
+  // produzia um objeto distinto, e compartilhar a mesma referência permitiria que
+  // um chamador afetasse o resultado do outro.
+  if (inFlight) return inFlight.then(item => ({ ...item }));
+
+  const operation = geocodeWithProviders(request, providers, language, region, options);
+  inFlightGeocodeRequests.set(inFlightKey, operation);
+  try {
+    return await operation;
+  } finally {
+    inFlightGeocodeRequests.delete(inFlightKey);
+  }
+}
+
+async function geocodeWithProviders(
+  request: GeocodeProviderRequest,
+  providers: GeocodeProvider[],
+  language: string,
+  region: string,
+  options: GeocodeReverseOptions
+): Promise<EnderecoConsulta> {
   let lastFailure: EnderecoConsulta | null = null;
+  let fallbackAfterFailure: string | null = null;
 
   for (let index = 0; index < providers.length; index++) {
     const provider = providers[index];
@@ -371,10 +499,15 @@ export async function geocodeReverse(
       continue;
     }
 
-    incrementUsage(provider.name);
-    const result = await provider.reverse(request);
+    const result = await reverseProviderWithRetry(provider, request);
     if (isSuccessResult(result)) {
-      const finalResult = await maybeCrossCheckResult(result, providers, index, request);
+      let finalResult = await maybeCrossCheckResult(result, providers, index, request);
+      if (fallbackAfterFailure) {
+        finalResult = appendValidationNote({
+          ...finalResult,
+          necessita_revisao: true
+        }, `Fallback para ${provider.name} após falha de ${fallbackAfterFailure}.`);
+      }
       await cacheResultIfNeeded(finalResult, language, region, options);
       return finalResult;
     }
@@ -385,9 +518,7 @@ export async function geocodeReverse(
     }
 
     lastFailure = result;
-    if (isRetryableProviderResult(result)) {
-      markCooldown(provider.name);
-    }
+    fallbackAfterFailure = provider.name;
   }
 
   if (lastFailure) {
@@ -395,7 +526,7 @@ export async function geocodeReverse(
     return lastFailure;
   }
 
-  return buildGeocodeRecord(lat, lng, {
+  return buildGeocodeRecord(request.lat, request.lng, {
     status_api: 'CONFIG_ERROR',
     provider_status: 'NO_ENABLED_PROVIDER',
     endereco_formatado: 'Nenhum provedor de geocodificação habilitado para a cadeia configurada.',

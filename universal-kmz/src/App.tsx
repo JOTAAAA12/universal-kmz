@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 
 import {
   ParserResult,
@@ -20,6 +20,7 @@ import SessionManager, { SavedSessionMeta } from './components/SessionManager';
 import WorkflowNav from './components/WorkflowNav';
 import GeocodeControlBar from './components/GeocodeControlBar';
 import WorkspaceTabs, { WorkspaceTab } from './components/WorkspaceTabs';
+import { publishWorkspaceSnapshot } from './components/ErrorBoundary';
 import {
   buildExistingAddressConflict,
   mergeExternalAddressRecord,
@@ -66,6 +67,30 @@ export default function App() {
   const [geocodeJobId, setGeocodeJobId] = useState('');
   const [geocodeJobStatus, setGeocodeJobStatus] = useState<'idle' | 'running' | 'paused' | 'done' | 'error'>('idle');
   const jobAppliedCountRef = useRef(0);
+  const geocodeAbortControllerRef = useRef<AbortController | null>(null);
+  const pollAbortControllerRef = useRef<AbortController | null>(null);
+  const trechosAbortControllerRef = useRef<AbortController | null>(null);
+
+  const isAbortError = (error: unknown) => error instanceof Error && error.name === 'AbortError';
+
+  const getRequestErrorMessage = (error: unknown, fallback: string) =>
+    error instanceof Error && error.name === 'TimeoutError'
+      ? 'A solicitação demorou demais. Tente novamente.'
+      : error instanceof Error ? error.message : fallback;
+
+  const signalWithTimeout = (controller: AbortController, timeoutMs: number) =>
+    AbortSignal.any([controller.signal, AbortSignal.timeout(timeoutMs)]);
+
+  const abortActiveGeocoding = () => {
+    cancelGeocodingRef.current = true;
+    geocodeAbortControllerRef.current?.abort();
+    pollAbortControllerRef.current?.abort();
+    trechosAbortControllerRef.current?.abort();
+  };
+
+  useEffect(() => () => {
+    abortActiveGeocoding();
+  }, []);
 
   const markDirty = () => {
     setHasUnsavedChanges(true);
@@ -151,9 +176,15 @@ export default function App() {
 
   const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-  const pollGeocodeJob = async (jobId: string) => {
-    while (!cancelGeocodingRef.current) {
-      const res = await fetch(`/api/geocode/jobs/${jobId}`);
+  const pollGeocodeJob = async (jobId: string, batchSignal: AbortSignal) => {
+    const pollController = new AbortController();
+    pollAbortControllerRef.current = pollController;
+
+    try {
+      while (!cancelGeocodingRef.current) {
+        const res = await fetch(`/api/geocode/jobs/${jobId}`, {
+          signal: AbortSignal.any([batchSignal, pollController.signal, AbortSignal.timeout(15_000)])
+        });
       const data = await res.json();
       if (!res.ok) {
         throw new Error(data?.error || 'Falha ao consultar progresso do job.');
@@ -161,7 +192,7 @@ export default function App() {
 
       const fetchedAddrs: EnderecoConsulta[] = data.resultados || data.results || [];
       const freshAddrs = fetchedAddrs.slice(jobAppliedCountRef.current);
-      freshAddrs.forEach(addr => updateStateWithGeocodedAddress(addr));
+        updateStateWithGeocodedAddresses(freshAddrs);
       jobAppliedCountRef.current = fetchedAddrs.length;
 
       setGeocodeProgress(data.feitos || 0);
@@ -181,27 +212,36 @@ export default function App() {
       }
 
       await wait(700);
+      }
+    } finally {
+      if (pollAbortControllerRef.current === pollController) {
+        pollAbortControllerRef.current = null;
+      }
     }
   };
 
-  const startOrResumeGeocodeJob = async () => {
+  const startOrResumeGeocodeJob = async (controller: AbortController) => {
     cancelGeocodingRef.current = false;
 
     if (geocodeJobId && geocodeJobStatus === 'paused') {
-      const resumeResponse = await fetch(`/api/geocode/jobs/${geocodeJobId}/resume`, { method: 'POST' });
+      const resumeResponse = await fetch(`/api/geocode/jobs/${geocodeJobId}/resume`, {
+        method: 'POST',
+        signal: signalWithTimeout(controller, 15_000)
+      });
       const resumeData = await resumeResponse.json();
       if (!resumeResponse.ok) {
         throw new Error(resumeData?.error || 'Falha ao retomar job de geocodificação.');
       }
       setGeocodeJobStatus(resumeData.status || 'running');
-      await pollGeocodeJob(geocodeJobId);
+      await pollGeocodeJob(geocodeJobId, controller.signal);
       return;
     }
 
     const response = await fetch('/api/geocode/jobs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ coordinates: pendingCoords })
+      body: JSON.stringify({ coordinates: pendingCoords }),
+      signal: signalWithTimeout(controller, 30_000)
     });
     const data = await response.json();
     if (!response.ok) {
@@ -211,7 +251,7 @@ export default function App() {
     setGeocodeJobId(data.id);
     setGeocodeJobStatus(data.status || 'running');
     jobAppliedCountRef.current = 0;
-    await pollGeocodeJob(data.id);
+    await pollGeocodeJob(data.id, controller.signal);
   };
 
   const tupleToCoordinate = (tuple: any): Coordinate | null => {
@@ -307,13 +347,17 @@ export default function App() {
     setGeocodeTotal(linhas.length + poligonos.length);
     setGeocodeProgress(0);
     cancelGeocodingRef.current = false;
+    trechosAbortControllerRef.current?.abort();
+    const trechosController = new AbortController();
+    trechosAbortControllerRef.current = trechosController;
     addAuditLog('GEOCODE_TRECHOS_START', 'Linhas e Polígonos', '-', `Linhas: ${linhas.length}; Polígonos: ${poligonos.length}`);
 
     try {
       const response = await fetch('/api/geocode/trechos', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ linhas, poligonos, stepMeters: sampleInterval })
+        body: JSON.stringify({ linhas, poligonos, stepMeters: sampleInterval }),
+        signal: signalWithTimeout(trechosController, 60_000)
       });
       const data = await response.json();
       if (!response.ok) {
@@ -332,12 +376,19 @@ export default function App() {
         addAuditLog('GEOCODE_TRECHOS_COMPLETE', 'Linhas e Polígonos', '-', `Amostras: ${data.total_amostras || 0}`, 'SUCESSO');
       }
     } catch (e) {
-      const message = e instanceof Error ? e.message : 'Falha inesperada na geocodificação por trechos.';
+      if (isAbortError(e)) return;
+      const message = getRequestErrorMessage(e, 'Falha inesperada na geocodificação por trechos.');
       setGeocodeError(message);
       setGeocodeJobStatus('error');
       addAuditLog('GEOCODE_TRECHOS_ERROR', 'Linhas e Polígonos', 'Processamento por trechos', message, 'ERRO');
     } finally {
-      setIsGeocoding(false);
+      // Só a execução ainda vigente pode desligar o spinner: uma execução
+      // substituída (abortada por um novo início) não deve apagar o estado
+      // de carregamento que a execução nova acabou de ligar.
+      if (trechosAbortControllerRef.current === trechosController) {
+        trechosAbortControllerRef.current = null;
+        setIsGeocoding(false);
+      }
     }
   };
 
@@ -347,6 +398,9 @@ export default function App() {
     setIsGeocoding(true);
     setGeocodeError('');
     cancelGeocodingRef.current = false;
+    geocodeAbortControllerRef.current?.abort();
+    const geocodeController = new AbortController();
+    geocodeAbortControllerRef.current = geocodeController;
 
     let idx = currentIndex;
 
@@ -355,13 +409,17 @@ export default function App() {
 
     if (pendingCoords.length > 20) {
       try {
-        await startOrResumeGeocodeJob();
+        await startOrResumeGeocodeJob(geocodeController);
       } catch (e) {
-        const message = e instanceof Error ? e.message : 'Falha inesperada no job de geocodificação.';
+        if (isAbortError(e)) return;
+        const message = getRequestErrorMessage(e, 'Falha inesperada no job de geocodificação.');
         setGeocodeError(message);
         addAuditLog('GEOCODE_ERROR', 'Processamento API', 'Job em lote', message, 'ERRO');
       } finally {
-        setIsGeocoding(false);
+        if (geocodeAbortControllerRef.current === geocodeController) {
+          geocodeAbortControllerRef.current = null;
+          setIsGeocoding(false);
+        }
       }
       return;
     }
@@ -377,7 +435,8 @@ export default function App() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             coordinates: [coord]
-          })
+          }),
+          signal: signalWithTimeout(geocodeController, 30_000)
         });
 
         const data = await res.json();
@@ -398,13 +457,14 @@ export default function App() {
           const addr = fetchedAddrs[0];
           
           // Reactively update Address state and map features live
-          updateStateWithGeocodedAddress(addr);
+          updateStateWithGeocodedAddresses([addr]);
           if (addr.necessita_revisao && addr.provider_error_message) {
             setGeocodeError(addr.provider_error_message);
           }
         }
       } catch (e) {
-        const message = e instanceof Error ? e.message : 'Falha inesperada na geocodificação.';
+        if (isAbortError(e)) break;
+        const message = getRequestErrorMessage(e, 'Falha inesperada na geocodificação.');
         setGeocodeError(message);
         addAuditLog('GEOCODE_ERROR', 'Processamento API', `Coordenada: ${coord.lat},${coord.lng}`, message, 'ERRO');
         cancelGeocodingRef.current = true;
@@ -416,45 +476,64 @@ export default function App() {
       idx++;
     }
 
-    setIsGeocoding(false);
-    if (cancelGeocodingRef.current) {
-      addAuditLog('GEOCODE_PAUSED', 'Processamento API', `Pausado em ${currentIndex}`, `Total: ${pendingCoords.length}`, 'ALERTA');
-    } else {
-      addAuditLog('GEOCODE_COMPLETE', 'Processamento API', '-', `Processados: ${pendingCoords.length}`, 'SUCESSO');
+    // Execução substituída por um novo início não encerra o spinner nem registra
+    // desfecho na auditoria: a execução vigente é a dona desse estado.
+    if (geocodeAbortControllerRef.current === geocodeController) {
+      geocodeAbortControllerRef.current = null;
+      setIsGeocoding(false);
+      if (cancelGeocodingRef.current) {
+        addAuditLog('GEOCODE_PAUSED', 'Processamento API', `Pausado em ${currentIndex}`, `Total: ${pendingCoords.length}`, 'ALERTA');
+      } else {
+        addAuditLog('GEOCODE_COMPLETE', 'Processamento API', '-', `Processados: ${pendingCoords.length}`, 'SUCESSO');
+      }
     }
   };
 
   const handlePauseGeocoding = () => {
+    abortActiveGeocoding();
     if (geocodeJobId && geocodeJobStatus === 'running') {
-      void fetch(`/api/geocode/jobs/${geocodeJobId}/pause`, { method: 'POST' });
+      void fetch(`/api/geocode/jobs/${geocodeJobId}/pause`, {
+        method: 'POST',
+        signal: AbortSignal.timeout(15_000)
+      }).catch(error => {
+        if (!isAbortError(error)) {
+          setGeocodeError('Não foi possível confirmar a pausa do job no servidor.');
+        }
+      });
       setGeocodeJobStatus('paused');
     }
-    cancelGeocodingRef.current = true;
     setIsGeocoding(false);
   };
 
   const handleCancelGeocoding = () => {
-    cancelGeocodingRef.current = true;
+    abortActiveGeocoding();
     setIsGeocoding(false);
     setCurrentIndex(0);
     setGeocodeProgress(0);
     if (geocodeJobId && geocodeJobStatus === 'running') {
-      void fetch(`/api/geocode/jobs/${geocodeJobId}/pause`, { method: 'POST' });
+      void fetch(`/api/geocode/jobs/${geocodeJobId}/pause`, {
+        method: 'POST',
+        signal: AbortSignal.timeout(15_000)
+      }).catch(error => {
+        if (!isAbortError(error)) {
+          setGeocodeError('Não foi possível cancelar o job no servidor.');
+        }
+      });
     }
     setGeocodeJobId('');
     setGeocodeJobStatus('idle');
     jobAppliedCountRef.current = 0;
   };
 
-  // Reactively updatesPoints, Trechos, Polygons and Addresses cached states
-  const updateStateWithGeocodedAddress = (addr: EnderecoConsulta) => {
+  // Merge one received batch in a single state pass while preserving the per-address rules.
+  const updateStateWithGeocodedAddresses = (addresses: EnderecoConsulta[]) => {
+    if (addresses.length === 0) return;
+
     markDirty();
     setResult(current => {
       if (!current) return current;
-      const result = current;
 
-      // Normalize address keys and guarantee a fallback empty string for missing or partial fields
-      const safeAddr: EnderecoConsulta = {
+      const safeAddresses: EnderecoConsulta[] = addresses.map(addr => ({
         ...addr,
         endereco_formatado: addr.endereco_formatado || '',
         logradouro: addr.logradouro || '',
@@ -470,93 +549,113 @@ export default function App() {
         plus_code: addr.plus_code || '',
         status_api: addr.status_api || 'SUCESSO',
         fonte: addr.fonte || 'Geocoding API',
-      };
+      }));
+      const coordinateKey = (lat: number, lng: number) => `${lat.toFixed(5)},${lng.toFixed(5)}`;
+      const addressesByCoordinate = new Map<string, { address: EnderecoConsulta; index: number }[]>();
 
-    const updatedPontos = result.pontos.map(p => {
-      // match coordinate rounded mapping within ~5 meters (5 decimal places)
-      const matchLat = p.latitude.toFixed(5) === safeAddr.latitude.toFixed(5);
-      const matchLng = p.longitude.toFixed(5) === safeAddr.longitude.toFixed(5);
-      if (matchLat && matchLng) {
-        return mergePointWithGeocodedAddress(p, safeAddr);
-      }
-      return p;
-    });
+      safeAddresses.forEach((address, index) => {
+        const coordinate = coordinateKey(address.latitude, address.longitude);
+        addressesByCoordinate.set(coordinate, [...(addressesByCoordinate.get(coordinate) || []), { address, index }]);
+      });
 
-    const updatedTrechos = result.trechos.map(t => {
-      let changed = false;
-      const startMatch = t.inicio_lat.toFixed(5) === safeAddr.latitude.toFixed(5) && t.inicio_lng.toFixed(5) === safeAddr.longitude.toFixed(5);
-      const endMatch = t.fim_lat.toFixed(5) === safeAddr.latitude.toFixed(5) && t.fim_lng.toFixed(5) === safeAddr.longitude.toFixed(5);
-      
-      let initAddr = t.inicio_endereco;
-      let initPlaceId = t.inicio_place_id;
-      let finalAddr = t.fim_endereco;
-      let finalPlaceId = t.fim_place_id;
-      let conflict = t.conflito_endereco || '';
+      const updateTrecho = (
+        trecho: typeof current.trechos[number],
+        safeAddr: EnderecoConsulta,
+        startMatch: boolean,
+        endMatch: boolean
+      ) => {
+        if (!startMatch && !endMatch) return trecho;
 
-      if (startMatch) {
-         const startConflict = buildExistingAddressConflict(t.inicio_endereco, safeAddr, `inicio do trecho ${t.trecho_id}`);
-         if (startConflict) {
-           conflict = conflict ? `${conflict} ${startConflict}` : startConflict;
-         } else {
-           initAddr = safeAddr.endereco_formatado || t.inicio_endereco;
-         }
-         initPlaceId = safeAddr.place_id || t.inicio_place_id;
-         changed = true;
-      }
-      if (endMatch) {
-         const endConflict = buildExistingAddressConflict(t.fim_endereco, safeAddr, `fim do trecho ${t.trecho_id}`);
-         if (endConflict) {
-           conflict = conflict ? `${conflict} ${endConflict}` : endConflict;
-         } else {
-           finalAddr = safeAddr.endereco_formatado || t.fim_endereco;
-         }
-         finalPlaceId = safeAddr.place_id || t.fim_place_id;
-         changed = true;
-      }
+        let initAddr = trecho.inicio_endereco;
+        let initPlaceId = trecho.inicio_place_id;
+        let finalAddr = trecho.fim_endereco;
+        let finalPlaceId = trecho.fim_place_id;
+        let conflict = trecho.conflito_endereco || '';
 
-      if (changed) {
+        if (startMatch) {
+          const startConflict = buildExistingAddressConflict(trecho.inicio_endereco, safeAddr, `inicio do trecho ${trecho.trecho_id}`);
+          if (startConflict) {
+            conflict = conflict ? `${conflict} ${startConflict}` : startConflict;
+          } else {
+            initAddr = safeAddr.endereco_formatado || trecho.inicio_endereco;
+          }
+          initPlaceId = safeAddr.place_id || trecho.inicio_place_id;
+        }
+        if (endMatch) {
+          const endConflict = buildExistingAddressConflict(trecho.fim_endereco, safeAddr, `fim do trecho ${trecho.trecho_id}`);
+          if (endConflict) {
+            conflict = conflict ? `${conflict} ${endConflict}` : endConflict;
+          } else {
+            finalAddr = safeAddr.endereco_formatado || trecho.fim_endereco;
+          }
+          finalPlaceId = safeAddr.place_id || trecho.fim_place_id;
+        }
+
         return {
-          ...t,
+          ...trecho,
           inicio_endereco: initAddr,
           inicio_place_id: initPlaceId,
           fim_endereco: finalAddr,
           fim_place_id: finalPlaceId,
           status: conflict ? 'Conflito de Endereço' : 'Endereço Resolvido',
           conflito_endereco: conflict || undefined,
-          observacoes: conflict && !t.observacoes.includes(conflict) ? `${t.observacoes ? `${t.observacoes} ` : ''}${conflict}` : t.observacoes
+          observacoes: conflict && !trecho.observacoes.includes(conflict) ? `${trecho.observacoes ? `${trecho.observacoes} ` : ''}${conflict}` : trecho.observacoes
         };
-      }
-      return t;
-    });
+      };
 
-    const updatedPoligonos = result.poligonos.map(pl => {
-      const centroidMatch = pl.centroid_lat.toFixed(5) === safeAddr.latitude.toFixed(5) && pl.centroid_lng.toFixed(5) === safeAddr.longitude.toFixed(5);
-      if (centroidMatch) {
-        const conflict = buildExistingAddressConflict(pl.centroid_endereco, safeAddr, `centroide do poligono ${pl.poligono_id}`);
-        return {
-          ...pl,
-          centroid_endereco: conflict ? pl.centroid_endereco : safeAddr.endereco_formatado || pl.centroid_endereco,
-          conflito_endereco: conflict || pl.conflito_endereco,
-          observacoes: conflict && !pl.observacoes.includes(conflict) ? `${pl.observacoes ? `${pl.observacoes} ` : ''}${conflict}` : pl.observacoes
-        };
-      }
-      return pl;
-    });
+      const updatedPontos = current.pontos.map(point =>
+        (addressesByCoordinate.get(coordinateKey(point.latitude, point.longitude)) || [])
+          .reduce((updatedPoint, { address }) => mergePointWithGeocodedAddress(updatedPoint, address), point)
+      );
 
-    const updatedEnderecos = mergeExternalAddressRecord(result.enderecos, safeAddr);
+      const updatedTrechos = current.trechos.map(trecho => {
+        const matchesByIndex = new Map<number, { address: EnderecoConsulta; startMatch: boolean; endMatch: boolean }>();
+        for (const { address, index } of addressesByCoordinate.get(coordinateKey(trecho.inicio_lat, trecho.inicio_lng)) || []) {
+          matchesByIndex.set(index, { address, startMatch: true, endMatch: false });
+        }
+        for (const { address, index } of addressesByCoordinate.get(coordinateKey(trecho.fim_lat, trecho.fim_lng)) || []) {
+          const existing = matchesByIndex.get(index);
+          matchesByIndex.set(index, { address, startMatch: existing?.startMatch || false, endMatch: true });
+        }
+        return [...matchesByIndex.entries()]
+          .sort(([left], [right]) => left - right)
+          .reduce((updatedTrecho, [, match]) => updateTrecho(updatedTrecho, match.address, match.startMatch, match.endMatch), trecho);
+      });
 
-    // Recalculate geocoding metrics from address records, not only point rows.
-    const geocodedRecords = updatedEnderecos.filter(item => item.fonte !== 'Original');
-    const completedCount = updatedEnderecos.filter(item => item.endereco_formatado && item.status_api === 'SUCESSO').length;
+      const updatedPoligonos = current.poligonos.map(poligono =>
+        (addressesByCoordinate.get(coordinateKey(poligono.centroid_lat, poligono.centroid_lng)) || [])
+          .reduce((updatedPoligono, { address }) => {
+            const conflict = buildExistingAddressConflict(updatedPoligono.centroid_endereco, address, `centroide do poligono ${updatedPoligono.poligono_id}`);
+            return {
+              ...updatedPoligono,
+              centroid_endereco: conflict ? updatedPoligono.centroid_endereco : address.endereco_formatado || updatedPoligono.centroid_endereco,
+              conflito_endereco: conflict || updatedPoligono.conflito_endereco,
+              observacoes: conflict && !updatedPoligono.observacoes.includes(conflict) ? `${updatedPoligono.observacoes ? `${updatedPoligono.observacoes} ` : ''}${conflict}` : updatedPoligono.observacoes
+            };
+          }, poligono)
+      );
+
+      // mergeExternalAddressRecord decide por `coordenada_normalizada` sobre a lista
+      // COMPLETA (é assim que detecta o registro `fonte: 'Original'` do KML e desvia o
+      // endereço externo para um registro `-GEO`/`-MOCK` separado). Dobrar o lote em
+      // sequência sobre a lista inteira mantém exatamente a semântica por item do
+      // merge antigo, agora numa única passada de estado.
+      const updatedEnderecos = safeAddresses.reduce(
+        (enderecos, address) => mergeExternalAddressRecord(enderecos, address),
+        current.enderecos
+      );
+
+      const geocodedRecords = updatedEnderecos.filter(item => item.fonte !== 'Original');
+      const completedCount = updatedEnderecos.filter(item => item.endereco_formatado && item.status_api === 'SUCESSO').length;
 
       return {
-        ...result,
+        ...current,
         pontos: updatedPontos,
         trechos: updatedTrechos,
         poligonos: updatedPoligonos,
         enderecos: updatedEnderecos,
         resumo: {
-          ...result.resumo,
+          ...current.resumo,
           resultados_completos: completedCount,
           chamadas_realizadas: geocodedRecords.length
         }
@@ -601,6 +700,10 @@ export default function App() {
     toleranceMatch,
     activeWorkspaceTab
   } : null;
+
+  useEffect(() => {
+    publishWorkspaceSnapshot(sessionPayload);
+  }, [activeWorkspaceTab, geocodeMode, originalFile, result, sampleInterval, toleranceGroup, toleranceMatch]);
 
   const defaultSessionName = originalFile?.name
     ? `${originalFile.name.replace(/\.(kml|kmz)$/i, '')} - ${new Date().toLocaleString('pt-BR')}`

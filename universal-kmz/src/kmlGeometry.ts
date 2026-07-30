@@ -130,10 +130,12 @@ export function parseDeclaredLength(name: string): { text: string; m: number } {
   };
 }
 
-export function parseKmlCoordinates(coordStr: string): Coordinate[] {
-  if (!coordStr) return [];
+export function parseKmlCoordinates(coordStr: unknown): Coordinate[] {
+  if (coordStr === undefined || coordStr === null) return [];
   const coords: Coordinate[] = [];
-  const tuples = coordStr.trim().split(/\s+/);
+  const normalized = String(coordStr).replace(/\s*,\s*/g, ',').trim();
+  if (!normalized) return [];
+  const tuples = normalized.split(/\s+/);
 
   for (const tuple of tuples) {
     const parts = tuple.split(',');

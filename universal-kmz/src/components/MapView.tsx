@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useMemo, useState, useRef } from 'react';
 import { 
   APIProvider, Map, AdvancedMarker, Pin, InfoWindow, useMap, useAdvancedMarkerRef 
 } from '@vis.gl/react-google-maps';
@@ -135,33 +135,41 @@ export default function MapView({ result, apiKey }: MapViewProps) {
     );
   }
 
-  // Pre-mapping features for rendering vectors
-  const renderPolylines: { id: string; points: google.maps.LatLngLiteral[] }[] = [];
-  const renderPolygons: { id: string; points: google.maps.LatLngLiteral[] }[] = [];
+  const { pointFeatures, renderPolylines, renderPolygons } = useMemo(() => {
+    const points: KmlFeature[] = [];
+    const polylines: { id: string; points: google.maps.LatLngLiteral[] }[] = [];
+    const polygons: { id: string; points: google.maps.LatLngLiteral[] }[] = [];
 
-  for (const f of result.features) {
-    if (f.geometry_type === 'LineString') {
-      try {
-        const parsedGeom = JSON.parse(f.geojson);
-        if (parsedGeom && parsedGeom.coordinates) {
-          const path = parsedGeom.coordinates.map(([lng, lat]: [number, number]) => ({ lat, lng }));
-          renderPolylines.push({ id: f.feature_id, points: path });
-        }
-      } catch (e) {
-        // fallback
+    for (const feature of result.features) {
+      if (feature.geometry_type === 'Point') {
+        points.push(feature);
+        continue;
       }
-    } else if (f.geometry_type === 'Polygon') {
+
       try {
-        const parsedGeom = JSON.parse(f.geojson);
-        if (parsedGeom && parsedGeom.coordinates && parsedGeom.coordinates[0]) {
-          const path = parsedGeom.coordinates[0].map(([lng, lat]: [number, number]) => ({ lat, lng }));
-          renderPolygons.push({ id: f.feature_id, points: path });
+        const geometry = JSON.parse(feature.geojson);
+        if (feature.geometry_type === 'LineString' && geometry?.coordinates) {
+          polylines.push({
+            id: feature.feature_id,
+            points: geometry.coordinates.map(([lng, lat]: [number, number]) => ({ lat, lng }))
+          });
         }
-      } catch (e) {
-        // fallback
+        if (feature.geometry_type === 'Polygon' && geometry?.coordinates?.[0]) {
+          polygons.push({
+            id: feature.feature_id,
+            points: geometry.coordinates[0].map(([lng, lat]: [number, number]) => ({ lat, lng }))
+          });
+        }
+      } catch {
+        // Invalid geometry stays out of the map while the remaining features render.
       }
     }
-  }
+
+    return { pointFeatures: points, renderPolylines: polylines, renderPolygons: polygons };
+  }, [result]);
+  const maxRenderedPointMarkers = 500;
+  const renderedPointFeatures = pointFeatures.slice(0, maxRenderedPointMarkers);
+  const hiddenPointMarkers = pointFeatures.length - renderedPointFeatures.length;
 
   return (
     <div className="space-y-4 animate-fade-in" id="workspace-maps-canvas">
@@ -189,6 +197,12 @@ export default function MapView({ result, apiKey }: MapViewProps) {
         </div>
       </div>
 
+      {hiddenPointMarkers > 0 && (
+        <p className="px-3 text-center text-[11px] text-slate-500">
+          Exibindo os primeiros {maxRenderedPointMarkers} de {pointFeatures.length} marcadores de pontos para manter o mapa responsivo.
+        </p>
+      )}
+
       {/* Actual Map frame wrapper */}
       <div className="w-full h-[520px] rounded-2xl overflow-hidden shadow-sm relative border border-slate-100" id="google-maps-frame-wrapper">
         <APIProvider
@@ -207,7 +221,7 @@ export default function MapView({ result, apiKey }: MapViewProps) {
             <MapBoundFitter result={result} />
 
             {/* Render Point placemarks */}
-            {result.features.filter(f => f.geometry_type === 'Point').map(f => (
+            {renderedPointFeatures.map(f => (
               <AdvancedMarker
                 key={f.feature_id}
                 position={{ lat: f.latitude_principal, lng: f.longitude_principal }}

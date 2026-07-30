@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 
-import { getDistanceMeters } from '../src/kmlParser';
+import { getDistanceMeters, parseKmlCoordinates } from '../src/kmlParser';
+import { decodeKmlBuffer } from '../src/kmlEncoding';
 import {
   consolidateSegments,
   resolveDominantPolygonAddress,
@@ -40,6 +41,19 @@ for (let i = 1; i < sampled.length; i++) {
   assert.ok(gap >= 10, `duplicate/near sample at ${i}`);
   assert.ok(gap <= 110, `sample gap too large at ${i}: ${gap}`);
 }
+
+const coordinatesWithSpacesAfterComma = parseKmlCoordinates('-46.1, -23.2, 0\n-46.2, -23.3');
+assert.equal(coordinatesWithSpacesAfterComma.length, 2);
+assert.equal(coordinatesWithSpacesAfterComma[0].lng, -46.1);
+assert.equal(coordinatesWithSpacesAfterComma[0].lat, -23.2);
+assert.equal(coordinatesWithSpacesAfterComma[1].lng, -46.2);
+assert.equal(coordinatesWithSpacesAfterComma[1].lat, -23.3);
+
+const latin1Kml = Buffer.from(
+  '<?xml version="1.0" encoding="ISO-8859-1"?><kml><Document><name>São José</name></Document></kml>',
+  'latin1'
+);
+assert.match(decodeKmlBuffer(latin1Kml), /São José/);
 
 const roadCoords: Coordinate[] = [
   { lat: 0, lng: 0 },

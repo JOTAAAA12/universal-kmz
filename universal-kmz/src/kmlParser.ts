@@ -186,7 +186,8 @@ export function parseKmlStringToResult(
     ignoreAttributes: false,
     attributeNamePrefix: '@_',
     parseAttributeValue: true,
-    textNodeName: '#text'
+    textNodeName: '#text',
+    removeNSPrefix: true
   });
 
   const parsedJson = parser.parse(kmlString);
@@ -203,14 +204,29 @@ export function parseKmlStringToResult(
   const idSeed = options.idSeed || fileHash;
 
   const features: KmlFeature[] = [];
-  const pontos: PointFeature[] = [];
-  const trechos: TrechoFeature[] = [];
+  let pontos: PointFeature[] = [];
+  let trechos: TrechoFeature[] = [];
   const poligonos: PoligonoFeature[] = [];
   const errosAlertas: ErroAlerta[] = [];
   const associacoes: Associacao[] = [];
   const auditoria: AuditoriaLog[] = [];
   const enderecos: any[] = [];
   const uniqueEnderecosMap: Record<string, boolean> = {};
+  const featureCoordinatesById = new Map<string, Coordinate[]>();
+  const featureBoundingBoxById = new Map<string, ReturnType<typeof calculateBoundingBox>>();
+
+  if (/<\s*gx:Track\b/i.test(kmlString)) {
+    errosAlertas.push({
+      erro_id: 'ERR-GX-TRACK',
+      severidade: 'ALERTA',
+      categoria: 'Parsing',
+      etapa: 'Parsing',
+      mensagem: 'Geometria gx:Track detectada e não suportada; o traçado foi ignorado.',
+      detalhe_tecnico: 'O parser normaliza prefixos de namespace, mas não interpreta amostras temporais de gx:Track.',
+      acao_recomendada: 'Converta gx:Track para LineString antes do envio, se o traçado for necessário.',
+      resolvido: false
+    });
+  }
 
   const addParsedEndereco = (lat: number, lng: number, addrData: any) => {
     if (!addrData.endereco_formatado) return;
@@ -418,6 +434,8 @@ export function parseKmlStringToResult(
     };
 
     features.push(kf);
+    featureCoordinatesById.set(feature_id, geometryCoordinates);
+    featureBoundingBoxById.set(feature_id, bbox);
 
     // Extract address components from KML element attributes or descriptions (if any exist)
     const rawExtractedAddr = extractAddressFromPlacemark(pl, placemarkNome);
@@ -541,56 +559,91 @@ export function parseKmlStringToResult(
 
   // Cross-associations checks: Point close to LineStrings or Line extremities
   // Tolerances configured by default: 30m for point to trecho, 5m for clustering endpoints
-  for (const pt of pontos) {
+  const associationThresholdMeters = 30;
+  const endpointThresholdMeters = 5;
+  // Limite INFERIOR de metros por grau (o valor real é ~111.195 m com o R_EARTH de
+  // 6.371 km usado em distancePointToSegment). Usar um denominador menor que o real
+  // torna a margem do prefiltro maior que o limiar, garantindo que a bbox expandida
+  // nunca descarte um ponto que a distância exata ainda consideraria dentro de 30 m.
+  const metersPerDegreeLowerBound = 110_000;
+  const trechoBboxIndex: Array<{
+    trecho: TrechoFeature;
+    coordinates: Coordinate[];
+    bbox: ReturnType<typeof calculateBoundingBox>;
+  }> = [];
+
+  for (const trecho of trechos) {
+    const coordinates = featureCoordinatesById.get(trecho.feature_id);
+    const bbox = featureBoundingBoxById.get(trecho.feature_id);
+    if (coordinates && coordinates.length > 1 && bbox) {
+      trechoBboxIndex.push({ trecho, coordinates, bbox });
+    }
+  }
+
+  const pointIdsByTrechoId = new Map<string, string[]>();
+  pontos = pontos.map(pt => {
     let closestTrecho: TrechoFeature | null = null;
     let minDistance = Infinity;
+    const latMargin = associationThresholdMeters / metersPerDegreeLowerBound;
+    const lngMargin = associationThresholdMeters /
+      (metersPerDegreeLowerBound * Math.max(Math.cos((pt.latitude * Math.PI) / 180), 0.01));
 
-    for (const tr of trechos) {
-      // Find parent KmlFeature coordinates
-      const kf = features.find(f => f.feature_id === tr.feature_id);
-      if (kf) {
-        const polylineCoords = parseKmlCoordinates(JSON.parse(kf.geojson).coordinates ? 
-          JSON.parse(kf.geojson).coordinates.map(([lng, lat]: [number, number]) => `${lng},${lat}`).join(' ') : '');
-        
-        if (polylineCoords.length > 1) {
-          for (let i = 0; i < polylineCoords.length - 1; i++) {
-            const dist = distancePointToSegment(
-              { lat: pt.latitude, lng: pt.longitude },
-              polylineCoords[i],
-              polylineCoords[i+1]
-            );
-            if (dist < minDistance) {
-              minDistance = dist;
-              closestTrecho = tr;
-            }
-          }
+    for (const { trecho, coordinates, bbox } of trechoBboxIndex) {
+      const isOutsideExpandedBbox =
+        pt.latitude < bbox.minLat - latMargin ||
+        pt.latitude > bbox.maxLat + latMargin ||
+        pt.longitude < bbox.minLng - lngMargin ||
+        pt.longitude > bbox.maxLng + lngMargin;
+      if (isOutsideExpandedBbox) continue;
+
+      for (let i = 0; i < coordinates.length - 1; i++) {
+        const dist = distancePointToSegment(
+          { lat: pt.latitude, lng: pt.longitude },
+          coordinates[i],
+          coordinates[i + 1]
+        );
+        if (dist < minDistance) {
+          minDistance = dist;
+          closestTrecho = trecho;
         }
       }
     }
 
-    if (closestTrecho && minDistance <= 30) {
+    if (closestTrecho && minDistance <= associationThresholdMeters) {
       const currentObs = pt.observacoes ? `${pt.observacoes} ` : '';
-      pt.observacoes = `${currentObs}Associado a '${closestTrecho.nome_original}' a ${minDistance.toFixed(1)}m.`;
+      const observacoes = `${currentObs}Associado a '${closestTrecho.nome_original}' a ${minDistance.toFixed(1)}m.`;
       associacoes.push({
         associacao_id: `AS-${pt.point_id}-${closestTrecho.trecho_id}`,
-        tipo_associacao: minDistance <= 5 ? 'Ponto na extremidade do trecho' : 'Ponto próximo ao traçado',
+        tipo_associacao: minDistance <= endpointThresholdMeters ? 'Ponto na extremidade do trecho' : 'Ponto próximo ao traçado',
         feature_a: pt.point_id,
         feature_b: closestTrecho.trecho_id,
         distancia_m: minDistance,
         metodo: 'Projeção ortogonal',
-        confianca: minDistance <= 5 ? 'Alta' : 'Média',
+        confianca: minDistance <= endpointThresholdMeters ? 'Alta' : 'Média',
         status: 'Pendente',
         observacoes: `Proximidade automática detectada.`
       });
 
-      // Append point ID reference to closestTrecho
-      const currentAssoc = closestTrecho.pontos_associados;
-      closestTrecho.pontos_associados = currentAssoc === 'Nenhum' ? pt.point_id : `${currentAssoc}, ${pt.point_id}`;
-    } else {
-      const currentObs = pt.observacoes ? `${pt.observacoes} ` : '';
-      pt.observacoes = `${currentObs}Ponto isolado (sem trechos próximos em 30 metros).`;
+      const pointIds = pointIdsByTrechoId.get(closestTrecho.trecho_id) || [];
+      pointIds.push(pt.point_id);
+      pointIdsByTrechoId.set(closestTrecho.trecho_id, pointIds);
+      return { ...pt, observacoes };
     }
-  }
+
+    const currentObs = pt.observacoes ? `${pt.observacoes} ` : '';
+    return { ...pt, observacoes: `${currentObs}Ponto isolado (sem trechos próximos em 30 metros).` };
+  });
+
+  trechos = trechos.map(trecho => {
+    const pointIds = pointIdsByTrechoId.get(trecho.trecho_id);
+    if (!pointIds || pointIds.length === 0) return { ...trecho };
+
+    const currentAssoc = trecho.pontos_associados === 'Nenhum' ? '' : trecho.pontos_associados;
+    return {
+      ...trecho,
+      pontos_associados: [currentAssoc, ...pointIds].filter(Boolean).join(', ')
+    };
+  });
 
   // Calculate unique coordinates (estimating calls)
   const uniqueCoordinatesMap: Record<string, boolean> = {};

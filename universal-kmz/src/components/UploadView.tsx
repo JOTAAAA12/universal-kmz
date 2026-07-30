@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Upload, FileCode, CheckCircle2, ChevronRight, Settings, Info, CreditCard } from 'lucide-react';
 import { ParserResult } from '../types';
 
@@ -36,9 +36,24 @@ export default function UploadView({
   const [isDragActive, setIsDragActive] = useState(false);
   const [file, setFile] = useState<{ name: string; size: number; content: string } | null>(null);
   const [loading, setLoading] = useState(false);
+  const [isReadingFile, setIsReadingFile] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const [showConfig, setShowConfig] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const fileReaderRef = useRef<FileReader | null>(null);
+  const uploadAbortControllerRef = useRef<AbortController | null>(null);
+
+  const isAbortError = (error: unknown) => error instanceof Error && error.name === 'AbortError';
+
+  const getRequestErrorMessage = (error: unknown) =>
+    error instanceof Error && error.name === 'TimeoutError'
+      ? 'O envio demorou demais. Tente novamente.'
+      : error instanceof Error ? error.message : 'Falha de comunicação com o servidor secundário.';
+
+  useEffect(() => () => {
+    fileReaderRef.current?.abort();
+    uploadAbortControllerRef.current?.abort();
+  }, []);
 
   const calculateEstimateCost = () => {
     if (!file) return 0;
@@ -74,51 +89,63 @@ export default function UploadView({
     setErrorMsg('');
   };
 
-  const handleDrop = async (e: React.DragEvent) => {
+  const readFile = (selectedFile: File) => {
+    if (selectedFile.size > 50 * 1024 * 1024) {
+      setErrorMsg('O tamanho máximo permitido de arquivo é de 50MB.');
+      return;
+    }
+    if (!selectedFile.name.toLowerCase().endsWith('.kml') && !selectedFile.name.toLowerCase().endsWith('.kmz')) {
+      setErrorMsg('Arquivo inválido. Envie apenas arquivos .kml ou .kmz.');
+      return;
+    }
+
+    fileReaderRef.current?.abort();
+    const reader = new FileReader();
+    fileReaderRef.current = reader;
+    setIsReadingFile(true);
+    setErrorMsg('');
+    reader.onerror = () => {
+      if (fileReaderRef.current !== reader) return;
+      fileReaderRef.current = null;
+      setIsReadingFile(false);
+      setErrorMsg('Não foi possível ler o arquivo selecionado. Tente novamente.');
+    };
+    reader.onabort = () => {
+      if (fileReaderRef.current !== reader) return;
+      fileReaderRef.current = null;
+      setIsReadingFile(false);
+    };
+    reader.onload = (event) => {
+      if (fileReaderRef.current !== reader) return;
+      const content = event.target?.result as string;
+      const normalizedContent = selectedFile.name.toLowerCase().endsWith('.kmz')
+        ? content.split(',')[1] || content
+        : content;
+      processFileContents(selectedFile.name, selectedFile.size, normalizedContent);
+      fileReaderRef.current = null;
+      setIsReadingFile(false);
+    };
+
+    if (selectedFile.name.toLowerCase().endsWith('.kmz')) {
+      reader.readAsDataURL(selectedFile);
+    } else {
+      reader.readAsText(selectedFile);
+    }
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
     setIsDragActive(false);
 
     if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      const droppedFile = e.dataTransfer.files[0];
-      const reader = new FileReader();
-      
-      if (droppedFile.name.toLowerCase().endsWith('.kmz')) {
-        reader.onload = (event) => {
-          const result = event.target?.result as string;
-          const base64Content = result.split(',')[1] || result;
-          processFileContents(droppedFile.name, droppedFile.size, base64Content);
-        };
-        reader.readAsDataURL(droppedFile);
-      } else {
-        reader.onload = (event) => {
-          const textContent = event.target?.result as string;
-          processFileContents(droppedFile.name, droppedFile.size, textContent);
-        };
-        reader.readAsText(droppedFile);
-      }
+      readFile(e.dataTransfer.files[0]);
     }
   };
 
   const handleFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
-      const selectedFile = e.target.files[0];
-      const reader = new FileReader();
-
-      if (selectedFile.name.toLowerCase().endsWith('.kmz')) {
-        reader.onload = (event) => {
-          const result = event.target?.result as string;
-          const base64Content = result.split(',')[1] || result;
-          processFileContents(selectedFile.name, selectedFile.size, base64Content);
-        };
-        reader.readAsDataURL(selectedFile);
-      } else {
-        reader.onload = (event) => {
-          const textContent = event.target?.result as string;
-          processFileContents(selectedFile.name, selectedFile.size, textContent);
-        };
-        reader.readAsText(selectedFile);
-      }
+      readFile(e.target.files[0]);
     }
   };
 
@@ -126,6 +153,9 @@ export default function UploadView({
     if (!file) return;
     setLoading(true);
     setErrorMsg('');
+    uploadAbortControllerRef.current?.abort();
+    const uploadController = new AbortController();
+    uploadAbortControllerRef.current = uploadController;
 
     try {
       const response = await fetch('/api/upload', {
@@ -139,7 +169,8 @@ export default function UploadView({
           sampleInterval,
           toleranceGroup,
           toleranceMatch
-        })
+        }),
+        signal: AbortSignal.any([uploadController.signal, AbortSignal.timeout(60_000)])
       });
 
       if (!response.ok) {
@@ -158,11 +189,16 @@ export default function UploadView({
         size: file.size,
         raw: file.content
       });
-    } catch (err: any) {
-      console.error(err);
-      setErrorMsg(err.message || 'Falha de comunicação com o servidor secundário.');
+    } catch (err: unknown) {
+      if (isAbortError(err)) return;
+      setErrorMsg(getRequestErrorMessage(err));
     } finally {
-      setLoading(false);
+      // Envio substituído por um novo não libera o botão: quem manda no estado
+      // de carregamento é o envio vigente.
+      if (uploadAbortControllerRef.current === uploadController) {
+        uploadAbortControllerRef.current = null;
+        setLoading(false);
+      }
     }
   };
 
@@ -200,7 +236,17 @@ export default function UploadView({
           className="hidden"
         />
 
-        {file ? (
+        {isReadingFile ? (
+          <div className="space-y-3 flex flex-col items-center animate-fade-in">
+            <div className="bg-indigo-50 text-indigo-600 p-4 rounded-full border border-indigo-200">
+              <FileCode className="h-8 w-8 animate-pulse" />
+            </div>
+            <div>
+              <p className="font-bold text-slate-800 text-base">Lendo arquivo...</p>
+              <p className="text-xs text-slate-400 mt-1">Arquivos grandes podem levar alguns instantes.</p>
+            </div>
+          </div>
+        ) : file ? (
           <div className="space-y-3 flex flex-col items-center animate-fade-in">
             <div className="bg-emerald-50 text-emerald-600 p-4 rounded-full border border-emerald-200">
               <FileCode className="h-8 w-8" />

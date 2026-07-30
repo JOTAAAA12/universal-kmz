@@ -41,7 +41,8 @@ const quotaProvider: GeocodeProvider = {
       status_api: 'OVER_QUERY_LIMIT',
       provider_status: 'OVER_QUERY_LIMIT',
       fonte: 'quota-fake',
-      retryable: true
+      retryable: true,
+      provider_error_message: 'Retry-After: 1'
     });
   }
 };
@@ -75,10 +76,61 @@ const fallbackResult = await geocodeReverse(request.lat, request.lng, '', reques
 });
 
 assert.equal(disabledCalls, 0);
-assert.equal(quotaCalls, 1);
+assert.equal(quotaCalls, 3);
 assert.equal(fallbackCalls, 1);
 assert.equal(fallbackResult.fonte, 'fallback-fake');
 assert.equal(fallbackResult.status_api, 'SUCESSO');
+assert.equal(fallbackResult.necessita_revisao, true);
+assert.match(fallbackResult.observacao_validacao || '', /Fallback para fallback-fake após falha de quota-fake\./);
+
+const cooledFallbackResult = await geocodeReverse(request.lat, request.lng, '', request.language, request.region, {
+  providers: [quotaProvider, fallbackProvider],
+  env: request.env,
+  skipCache: true
+});
+assert.equal(quotaCalls, 3);
+assert.equal(fallbackCalls, 2);
+assert.equal(cooledFallbackResult.fonte, 'fallback-fake');
+
+let dedupCalls = 0;
+let releaseDedup: (() => void) | null = null;
+const dedupProvider: GeocodeProvider = {
+  name: 'dedup-fake',
+  isEnabled: () => true,
+  reverse: async item => {
+    dedupCalls++;
+    await new Promise<void>(resolve => {
+      releaseDedup = resolve;
+    });
+    return buildGeocodeRecord(item.lat, item.lng, {
+      status_api: 'SUCESSO',
+      provider_status: 'OK',
+      quantidade_resultados: 1,
+      fonte: 'dedup-fake',
+      endereco_formatado: 'Rua Deduplicada, 1',
+      necessita_revisao: false
+    });
+  }
+};
+
+const firstInFlight = geocodeReverse(request.lat, request.lng, '', request.language, request.region, {
+  providers: [dedupProvider],
+  env: request.env,
+  skipCache: true
+});
+const secondInFlight = geocodeReverse(request.lat, request.lng, '', request.language, request.region, {
+  providers: [dedupProvider],
+  env: request.env,
+  skipCache: true
+});
+await Promise.resolve();
+assert.equal(dedupCalls, 1);
+assert.ok(releaseDedup);
+releaseDedup();
+const [firstDedupResult, secondDedupResult] = await Promise.all([firstInFlight, secondInFlight]);
+assert.equal(dedupCalls, 1);
+assert.equal(firstDedupResult.endereco_formatado, 'Rua Deduplicada, 1');
+assert.equal(secondDedupResult.endereco_formatado, 'Rua Deduplicada, 1');
 
 const keylessStats = getGeocoderProviderStats('', false, {
   GEOCODER_CHAIN: 'google,locationiq,geoapify,bigdatacloud'

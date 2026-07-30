@@ -44,6 +44,18 @@ function kmlPoint(name: string, lng: number, lat: number) {
 </kml>`;
 }
 
+function kmlPrefixedPoint(name: string, lng: number, lat: number) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<kml:kml xmlns:kml="http://www.opengis.net/kml/2.2">
+  <kml:Document>
+    <kml:Placemark>
+      <kml:name>${name}</kml:name>
+      <kml:Point><kml:coordinates>${lng},${lat},0</kml:coordinates></kml:Point>
+    </kml:Placemark>
+  </kml:Document>
+</kml:kml>`;
+}
+
 async function postUpload(name: string, content: string) {
   return fetch(`${baseUrl}/api/upload`, {
     method: 'POST',
@@ -79,18 +91,19 @@ try {
   const zip = new JSZip();
   zip.file('doc-a.kml', kmlPoint('Ponto A', -46.1, -23.1));
   zip.file('nested/doc-b.kml', kmlPoint('Ponto B', -46.2, -23.2));
+  zip.file('prefixed.kml', kmlPrefixedPoint('Ponto Prefixado', -46.3, -23.3));
   const kmzBase64 = await zip.generateAsync({ type: 'base64' });
 
   const response = await postUpload('multi.kmz', kmzBase64);
   assert.equal(response.status, 200);
   const parsed = await response.json();
 
-  assert.equal(parsed.resumo.quantidade_kmls, 2);
-  assert.equal(parsed.resumo.quantidade_points, 2);
-  assert.equal(parsed.pontos.length, 2);
+  assert.equal(parsed.resumo.quantidade_kmls, 3);
+  assert.equal(parsed.resumo.quantidade_points, 3);
+  assert.equal(parsed.pontos.length, 3);
   assert.deepEqual(
     parsed.features.map((f: any) => f.kml_origem).sort(),
-    ['doc-a.kml', 'nested/doc-b.kml']
+    ['doc-a.kml', 'nested/doc-b.kml', 'prefixed.kml']
   );
 
   const emptyZip = new JSZip();

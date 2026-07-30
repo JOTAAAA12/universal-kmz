@@ -7,6 +7,7 @@ import JSZip from 'jszip';
 import { createServer as createViteServer } from 'vite';
 
 import { parseKmlStringToResult } from './src/kmlParser';
+import { decodeKmlBuffer } from './src/kmlEncoding';
 import {
   geocodeReverse,
   getGeocoderProviderByName,
@@ -19,7 +20,11 @@ import {
 import { loadCnefeIndex, type CnefeIndex, type CnefeIndexStats } from './src/cnefeIndex';
 import { CnefeDownloadManager } from './src/cnefeDownloader';
 import { createPersistentGeocodeCache, registerGeocodeCacheShutdown } from './src/geocodeCache';
-import { GeocodeJobManager, geocodeCoordinateBatch } from './src/geocodeJobs';
+import {
+  createPersistentGeocodeJobStore,
+  GeocodeJobManager,
+  geocodeCoordinateBatch
+} from './src/geocodeJobs';
 import { setCnefeIndex } from './src/providers/cnefe';
 import { validateCep } from './src/providers/viacep';
 import {
@@ -223,6 +228,7 @@ async function startServer() {
   const PORT = Number(process.env.PORT) || 3000;
   const HOST = process.env.HOST || '127.0.0.1';
   const geocodeCache = createPersistentGeocodeCache();
+  const geocodeJobStore = createPersistentGeocodeJobStore();
   let cnefeProviderState = buildCnefeProviderState(null, 'carregando', 'Indexação CNEFE em andamento.');
   let activeCnefeIndex: (CnefeIndex & { close?: () => void }) | null = null;
 
@@ -264,9 +270,11 @@ async function startServer() {
   };
 
   await geocodeCache.load();
+  await geocodeJobStore.load();
   await loadRuntimeConfig();
-  registerGeocodeCacheShutdown(geocodeCache);
-  const geocodeJobs = new GeocodeJobManager();
+  registerGeocodeCacheShutdown(geocodeCache, geocodeJobStore);
+  const geocodeJobs = new GeocodeJobManager(undefined, undefined, { store: geocodeJobStore });
+  geocodeJobs.restoreInterruptedJobs();
   const cnefeDownloader = new CnefeDownloadManager({
     onIndexProgress: stats => updateCnefeProviderState(stats, 'carregando', 'Carregamento do índice CNEFE em andamento.'),
     onIndexReady: index => {
@@ -437,7 +445,7 @@ async function startServer() {
 
         const parsedResults: ParserResult[] = [];
         for (const entry of kmlEntries) {
-          kmlString = await zipped.file(entry.path)!.async('string');
+          kmlString = decodeKmlBuffer(await zipped.file(entry.path)!.async('nodebuffer'));
           parsedResults.push(parseKmlStringToResult(kmlString, name, fileHash, processingType, 'BRASIL', {
             sourceKmlName: entry.path,
             idSeed: `${fileHash}:${entry.path}`,
@@ -452,7 +460,7 @@ async function startServer() {
         if (content.startsWith('data:') || !content.includes('<kml')) {
           // Check if Base64, clean up data prefix
           const cleanBase64 = content.replace(/^data:.*?;base64,/, '');
-          kmlString = Buffer.from(cleanBase64, 'base64').toString('utf8');
+          kmlString = decodeKmlBuffer(Buffer.from(cleanBase64, 'base64'));
         } else {
           kmlString = content;
         }
@@ -635,6 +643,13 @@ async function startServer() {
       return res.status(404).json({ error: 'Job de geocodificação não encontrado.' });
     }
     return res.json(snapshot);
+  });
+
+  app.delete('/api/geocode/jobs/:id', (req, res) => {
+    if (!geocodeJobs.discardJob(req.params.id)) {
+      return res.status(404).json({ error: 'Job de geocodificação não encontrado.' });
+    }
+    return res.status(204).end();
   });
 
   // API Route: Bulk Geocode Reverse Coordination Set
@@ -905,4 +920,7 @@ async function startServer() {
   });
 }
 
-startServer();
+startServer().catch((err: unknown) => {
+  console.error('Falha ao iniciar o servidor:', err);
+  process.exit(1);
+});

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { 
   Search, RefreshCw, Edit, Check, X
 } from 'lucide-react';
@@ -24,10 +24,22 @@ type TabType = 'features' | 'pontos' | 'trechos' | 'poligonos' | 'enderecos' | '
 
 type ResolutionStatus = 'SUCESSO' | 'PARCIAL' | 'FALHA';
 
+const PAGE_SIZE = 200;
+
 interface ResolutionBadge {
   status: ResolutionStatus;
   label: string;
   color: string;
+}
+
+function EmptyTableRow({ colSpan }: { colSpan: number }) {
+  return (
+    <tr>
+      <td colSpan={colSpan} className="p-6 text-center text-xs text-slate-400">
+        Nenhum registro
+      </td>
+    </tr>
+  );
 }
 
 function getAddressStatusForCoords(
@@ -195,49 +207,102 @@ export default function TabelaView({
   isGeocodingTrechos = false
 }: TabelaViewProps) {
   const [activeTab, setActiveTab] = useState<TabType>('features');
+  const [searchInput, setSearchInput] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
+  const [visibleRows, setVisibleRows] = useState(PAGE_SIZE);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editFields, setEditFields] = useState<Record<string, string>>({});
 
-  // Filters 
-  const filteredFeatures = result.features.filter(f => 
-    f.placemark_nome.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    f.caminho_pasta.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    f.geometry_type.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  useEffect(() => {
+    const debounceTimer = window.setTimeout(() => setSearchTerm(searchInput), 200);
+    return () => window.clearTimeout(debounceTimer);
+  }, [searchInput]);
 
-  const filteredPoints = result.pontos.filter(p => 
-    p.point_id.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    (p.endereco_formatado || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
-    p.tipo_ponto.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  useEffect(() => {
+    setVisibleRows(PAGE_SIZE);
+  }, [activeTab, searchTerm]);
 
-  const filteredTrechos = result.trechos.filter(t => 
-    t.nome_original.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    t.caminho_pasta.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    (t.inicio_endereco || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
-    (t.fim_endereco || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
-    (result.trechos_endereco || [])
-      .filter(item => item.linha_id === t.trecho_id)
-      .map(item => item.logradouro)
-      .join(' ')
-      .toLowerCase()
-      .includes(searchTerm.toLowerCase())
-  );
+  const {
+    filteredFeatures,
+    filteredPoints,
+    filteredTrechos,
+    filteredPoligonas,
+    filteredEnderecos,
+    filteredAssociacoes,
+    filteredErros
+  } = useMemo(() => {
+    const normalizedTerm = searchTerm.trim().toLowerCase();
+    const includesTerm = (...values: Array<string | number | undefined | null>) =>
+      normalizedTerm === '' || values.some(value => String(value || '').toLowerCase().includes(normalizedTerm));
+    const trechoAddresses = new Map<string, string>();
+    for (const address of result.trechos_endereco || []) {
+      trechoAddresses.set(
+        address.linha_id,
+        `${trechoAddresses.get(address.linha_id) || ''} ${address.logradouro || ''}`.trim()
+      );
+    }
+    const polygonAddresses = new Map((result.enderecos_poligono || []).map(address => [
+      address.poligono_id,
+      `${address.logradouro || ''} ${(address.confrontantes || []).join(' ')}`.trim()
+    ]));
 
-  const filteredPoligonas = result.poligonos.filter(pl => 
-    pl.nome_original.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    pl.caminho_pasta.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    ((result.enderecos_poligono || []).find(item => item.poligono_id === pl.poligono_id)?.logradouro || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
-    ((result.enderecos_poligono || []).find(item => item.poligono_id === pl.poligono_id)?.confrontantes || []).join(' ').toLowerCase().includes(searchTerm.toLowerCase())
-  );
+    return {
+      filteredFeatures: result.features.filter(feature => includesTerm(feature.placemark_nome, feature.caminho_pasta, feature.geometry_type)),
+      filteredPoints: result.pontos.filter(point => includesTerm(point.point_id, point.endereco_formatado, point.tipo_ponto)),
+      filteredTrechos: result.trechos.filter(trecho => includesTerm(
+        trecho.nome_original,
+        trecho.caminho_pasta,
+        trecho.inicio_endereco,
+        trecho.fim_endereco,
+        trechoAddresses.get(trecho.trecho_id)
+      )),
+      filteredPoligonas: result.poligonos.filter(poligono => includesTerm(
+        poligono.nome_original,
+        poligono.caminho_pasta,
+        polygonAddresses.get(poligono.poligono_id)
+      )),
+      filteredEnderecos: result.enderecos.filter(address => includesTerm(
+        address.coordenada_normalizada,
+        address.endereco_formatado,
+        address.bairro,
+        address.municipio
+      )),
+      filteredAssociacoes: result.associacoes.filter(associacao => includesTerm(
+        associacao.associacao_id,
+        associacao.tipo_associacao,
+        associacao.feature_a,
+        associacao.feature_b,
+        associacao.metodo,
+        associacao.status,
+        associacao.observacoes
+      )),
+      filteredErros: result.errosAlertas.filter(alerta => includesTerm(
+        alerta.erro_id,
+        alerta.severidade,
+        alerta.categoria,
+        alerta.mensagem,
+        alerta.detalhe_tecnico,
+        alerta.acao_recomendada
+      ))
+    };
+  }, [result, searchTerm]);
 
-  const filteredEnderecos = result.enderecos.filter(e => 
-    e.coordenada_normalizada.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    (e.endereco_formatado || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
-    (e.bairro || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
-    (e.municipio || '').toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  const visibleFeatures = filteredFeatures.slice(0, visibleRows);
+  const visiblePoints = filteredPoints.slice(0, visibleRows);
+  const visibleTrechos = filteredTrechos.slice(0, visibleRows);
+  const visiblePoligonos = filteredPoligonas.slice(0, visibleRows);
+  const visibleEnderecos = filteredEnderecos.slice(0, visibleRows);
+  const visibleAssociacoes = filteredAssociacoes.slice(0, visibleRows);
+  const visibleErros = filteredErros.slice(0, visibleRows);
+  const activeFilteredCount = {
+    features: filteredFeatures.length,
+    pontos: filteredPoints.length,
+    trechos: filteredTrechos.length,
+    poligonos: filteredPoligonas.length,
+    enderecos: filteredEnderecos.length,
+    associacoes: filteredAssociacoes.length,
+    erros: filteredErros.length
+  }[activeTab];
 
   // Inverter start/fim of Trecho (reverses points, swaps lat, lng and addresses)
   const handleInvertTrecho = (trecho_id: string) => {
@@ -399,7 +464,7 @@ export default function TabelaView({
           ].map(tab => (
             <button
               key={tab.id}
-              onClick={() => { setActiveTab(tab.id as any); setEditingId(null); }}
+              onClick={() => { setActiveTab(tab.id as TabType); setEditingId(null); setVisibleRows(PAGE_SIZE); }}
               className={`px-3 py-1.5 text-[11px] font-bold uppercase tracking-wider rounded border transition duration-150 flex items-center gap-1 ${
                 activeTab === tab.id
                   ? 'bg-indigo-600 text-white border-indigo-700 font-bold shadow-xs'
@@ -428,8 +493,8 @@ export default function TabelaView({
         <div className="relative w-full md:w-72">
           <input
             type="text"
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
             placeholder={`Buscar em ${activeTab}...`}
             className="w-full pl-9 pr-3 py-2 text-xs border border-slate-300 rounded bg-slate-50 font-mono focus:outline-none focus:bg-white focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
             id="sheet-filter-search-input"
@@ -458,7 +523,7 @@ export default function TabelaView({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-50">
-              {filteredFeatures.map(f => (
+              {visibleFeatures.length === 0 ? <EmptyTableRow colSpan={9} /> : visibleFeatures.map(f => (
                 <tr key={f.feature_id} className="hover:bg-slate-50/50">
                   <td className="p-3 font-mono font-semibold text-indigo-600 selection:bg-slate-100">{f.feature_id}</td>
                   <td className="p-3">
@@ -555,7 +620,7 @@ export default function TabelaView({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-50">
-              {filteredPoints.map(p => (
+              {visiblePoints.length === 0 ? <EmptyTableRow colSpan={11} /> : visiblePoints.map(p => (
                 <tr key={p.point_id} className="hover:bg-slate-50/50">
                   <td className="p-3 font-mono font-semibold text-slate-700">{p.point_id}</td>
                   <td className="p-3 font-mono text-indigo-600">{p.feature_id}</td>
@@ -671,10 +736,14 @@ export default function TabelaView({
           </table>
         )}
 
-        {activeTab === 'trechos' && (
+        {activeTab === 'trechos' && (visibleTrechos.length === 0 ? (
+          <table className="w-full text-left border-collapse text-xs">
+            <tbody><EmptyTableRow colSpan={1} /></tbody>
+          </table>
+        ) : (
           <TrechosTable
             result={result}
-            trechos={filteredTrechos}
+            trechos={visibleTrechos}
             editingId={editingId}
             editFields={editFields}
             setEditFields={setEditFields}
@@ -683,15 +752,19 @@ export default function TabelaView({
             onSaveEdit={(id) => handleSaveEdit('trechos', id)}
             onInvertTrecho={handleInvertTrecho}
           />
-        )}
+        ))}
 
-        {activeTab === 'poligonos' && (
+        {activeTab === 'poligonos' && (visiblePoligonos.length === 0 ? (
+          <table className="w-full text-left border-collapse text-xs">
+            <tbody><EmptyTableRow colSpan={1} /></tbody>
+          </table>
+        ) : (
           <PoligonosTable
             result={result}
-            poligonos={filteredPoligonas}
+            poligonos={visiblePoligonos}
             onStartEdit={handleStartEdit}
           />
-        )}
+        ))}
 
         {/* Addresses sheets */}
         {activeTab === 'enderecos' && (
@@ -711,7 +784,7 @@ export default function TabelaView({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-50">
-              {filteredEnderecos.map(e => (
+              {visibleEnderecos.length === 0 ? <EmptyTableRow colSpan={10} /> : visibleEnderecos.map(e => (
                 <tr key={e.consulta_id} className="hover:bg-slate-50/50">
                   <td className="p-3 font-mono font-semibold text-indigo-600">{e.consulta_id}</td>
                   <td className="p-3 font-mono text-slate-500">{e.coordenada_normalizada}</td>
@@ -765,7 +838,7 @@ export default function TabelaView({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-50">
-              {result.associacoes.map(a => (
+              {visibleAssociacoes.length === 0 ? <EmptyTableRow colSpan={9} /> : visibleAssociacoes.map(a => (
                 <tr key={a.associacao_id} className="hover:bg-slate-50/50">
                   <td className="p-3 font-mono font-semibold text-slate-600">{a.associacao_id}</td>
                   <td className="p-3 font-semibold text-slate-700">{a.tipo_associacao}</td>
@@ -802,7 +875,7 @@ export default function TabelaView({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-50">
-              {result.errosAlertas.map(e => (
+              {visibleErros.length === 0 ? <EmptyTableRow colSpan={6} /> : visibleErros.map(e => (
                 <tr key={e.erro_id} className="hover:bg-slate-50/50">
                   <td className="p-3 font-mono font-semibold text-rose-600">{e.erro_id}</td>
                   <td className="p-3">
@@ -818,6 +891,18 @@ export default function TabelaView({
               ))}
             </tbody>
           </table>
+        )}
+
+        {activeFilteredCount > visibleRows && (
+          <div className="border-t border-slate-100 bg-slate-50 p-3 text-center">
+            <button
+              type="button"
+              onClick={() => setVisibleRows(current => current + PAGE_SIZE)}
+              className="rounded border border-slate-300 bg-white px-3 py-2 text-[11px] font-bold uppercase tracking-wider text-slate-600 transition hover:bg-slate-100"
+            >
+              Mostrar mais ({Math.min(PAGE_SIZE, activeFilteredCount - visibleRows)})
+            </button>
+          </div>
         )}
       </div>
     </div>
