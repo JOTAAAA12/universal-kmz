@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import JSZip from 'jszip';
 
-import { CnefeDownloadManager } from '../src/cnefeDownloader';
+import { checkUfUpdates, CnefeDownloadManager, readUfVersions } from '../src/cnefeDownloader';
 import type { CnefeIndex } from '../src/cnefeIndex';
 
 const ETAG_V1 = '"cnefe-fixture-v1"';
@@ -41,6 +41,20 @@ function zipResponse(zipBuffer: Buffer, status: 200 | 206, etag: string, start =
       'last-modified': LAST_MODIFIED
     }
   });
+}
+
+function fakeHeadFetch(getMeta: () => { etag?: string; lastModified?: string }) {
+  return (async (_input: string | URL | Request, init?: RequestInit) => {
+    assert.equal(init?.method, 'HEAD', 'a checagem de atualização deve usar HEAD');
+    const meta = getMeta();
+    return new Response(null, {
+      status: 200,
+      headers: {
+        ...(meta.etag ? { etag: meta.etag } : {}),
+        ...(meta.lastModified ? { 'last-modified': meta.lastModified } : {})
+      }
+    });
+  }) as typeof fetch;
 }
 
 async function expectMissing(filePath: string) {
@@ -103,6 +117,42 @@ try {
   assert.equal(sawIfRange, true);
   assert.equal((await resumeManager.getState('SP'))?.linhas, 2);
   await stat(path.join(resumeDir, 'cnefe_SP.csv'));
+
+  const versoes = await readUfVersions(resumeDir);
+  assert.ok(versoes.SP, 'UF ingerida deve ter versão registrada');
+  assert.equal(versoes.SP.etag, ETAG_V1);
+  assert.ok(versoes.SP.baixadoEm, 'deve registrar data do download');
+
+  let head: { etag?: string; lastModified?: string } = { etag: ETAG_V1 };
+  let updates = await checkUfUpdates(['SP'], resumeDir, fakeHeadFetch(() => head));
+  assert.equal(updates.SP.atualizacaoDisponivel, false);
+
+  head = {};
+  updates = await checkUfUpdates(['SP'], resumeDir, fakeHeadFetch(() => head));
+  assert.equal(updates.SP.atualizacaoDisponivel, false);
+
+  head = { etag: ETAG_V2 };
+  updates = await checkUfUpdates(['SP'], resumeDir, fakeHeadFetch(() => head));
+  assert.equal(updates.SP.atualizacaoDisponivel, true);
+
+  updates = await checkUfUpdates(['SP'], resumeDir, async () => {
+    throw new Error('offline');
+  });
+  assert.equal(updates.SP.atualizacaoDisponivel, false);
+
+  let headRequestsForMissingUf = 0;
+  const semRegistro = await checkUfUpdates(['RR'], resumeDir, async () => {
+    headRequestsForMissingUf += 1;
+    throw new Error('não deve consultar UF sem versão local');
+  });
+  assert.deepEqual(semRegistro.RR, { atualizacaoDisponivel: false, versaoLocal: null });
+  assert.equal(headRequestsForMissingUf, 0);
+
+  const corruptVersionsDir = path.join(tmp, 'versoes-corrompidas');
+  await mkdir(corruptVersionsDir, { recursive: true });
+  assert.deepEqual(await readUfVersions(corruptVersionsDir), {});
+  await writeFile(path.join(corruptVersionsDir, 'versoes-uf.json'), '{ conteúdo inválido');
+  assert.deepEqual(await readUfVersions(corruptVersionsDir), {});
 
   const stale200Dir = path.join(tmp, 'stale-200');
   const stale200Part = path.join(stale200Dir, '35_SP.zip.part');

@@ -16,6 +16,7 @@ const regressions: readonly Regression[] = [
   { name: 'precision', file: 'scripts/precision-regression.ts' },
   { name: 'provider-chain', file: 'scripts/provider-chain-regression.ts' },
   { name: 'cnefe', file: 'scripts/cnefe-regression.ts' },
+  { name: 'uf-bounds', file: 'scripts/uf-bounds-regression.ts' },
   { name: 'cnefe-downloader', file: 'scripts/cnefe-downloader-regression.ts' },
   { name: 'cache-and-jobs', file: 'scripts/cache-and-jobs-regression.ts' },
   { name: 'upload-contract', file: 'scripts/upload-contract-regression.ts' },

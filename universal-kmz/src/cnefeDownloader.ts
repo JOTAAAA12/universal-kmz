@@ -45,6 +45,12 @@ interface CnefePartMeta {
   lastModified?: string;
 }
 
+export interface CnefeUfVersion {
+  etag?: string;
+  lastModified?: string;
+  baixadoEm: string;
+}
+
 interface DownloadRequest {
   response: Response;
   signal: AbortSignal;
@@ -54,6 +60,7 @@ interface DownloadRequest {
 }
 
 const INACTIVITY_TIMEOUT_MS = 60_000;
+const UF_VERSIONS_FILE = 'versoes-uf.json';
 
 export const CNEFE_BASE_URL =
   'https://ftp.ibge.gov.br/Cadastro_Nacional_de_Enderecos_para_Fins_Estatisticos/Censo_Demografico_2022/Arquivos_CNEFE/CSV/UF/';
@@ -81,6 +88,12 @@ function normalizeUf(value: string): string {
 
 function getStateByUf(uf: string) {
   return CNEFE_STATES.find(item => item.uf === normalizeUf(uf));
+}
+
+function zipUrlForUf(uf: string): string {
+  const state = getStateByUf(uf);
+  if (!state) throw new Error(`UF CNEFE inválida: ${uf}.`);
+  return `${CNEFE_BASE_URL}${state.zip}`;
 }
 
 function parseTotalBytes(response: Response, resumeBytes: number): number | null {
@@ -115,7 +128,7 @@ async function dirSize(dir: string): Promise<number> {
   return total;
 }
 
-function getPartMeta(response: Response): CnefePartMeta {
+function metaFromResponse(response: Response): CnefePartMeta {
   const etag = response.headers.get('etag');
   const lastModified = response.headers.get('last-modified');
   return {
@@ -130,12 +143,78 @@ function getResumeValidator(meta: CnefePartMeta | null): string | null {
   return meta.lastModified || null;
 }
 
-function matchesPartMeta(saved: CnefePartMeta, received: CnefePartMeta): boolean {
+function metaMatches(saved: CnefePartMeta, received: CnefePartMeta): boolean | null {
   const comparable = [
     saved.etag && received.etag ? saved.etag === received.etag : null,
     saved.lastModified && received.lastModified ? saved.lastModified === received.lastModified : null
   ].filter((value): value is boolean => value !== null);
-  return comparable.length > 0 && comparable.every(Boolean);
+  return comparable.length > 0 ? comparable.every(Boolean) : null;
+}
+
+export async function readUfVersions(dir: string): Promise<Record<string, CnefeUfVersion>> {
+  try {
+    const raw = await readFile(path.join(dir, UF_VERSIONS_FILE), 'utf8');
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+
+    const entries = Object.entries(parsed).flatMap(([uf, value]) => {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
+      const candidate = value as Partial<CnefeUfVersion>;
+      if (typeof candidate.baixadoEm !== 'string') return [];
+      return [[uf, {
+        ...(typeof candidate.etag === 'string' ? { etag: candidate.etag } : {}),
+        ...(typeof candidate.lastModified === 'string' ? { lastModified: candidate.lastModified } : {}),
+        baixadoEm: candidate.baixadoEm
+      }] as const];
+    });
+    return Object.fromEntries(entries);
+  } catch {
+    return {};
+  }
+}
+
+async function writeUfVersion(dir: string, uf: string, meta: CnefePartMeta, baixadoEm: string) {
+  try {
+    const atual = await readUfVersions(dir);
+    const proximo = {
+      ...atual,
+      [normalizeUf(uf)]: {
+        ...(meta.etag ? { etag: meta.etag } : {}),
+        ...(meta.lastModified ? { lastModified: meta.lastModified } : {}),
+        baixadoEm
+      }
+    };
+    await writeFile(path.join(dir, UF_VERSIONS_FILE), JSON.stringify(proximo, null, 2), 'utf8');
+  } catch {
+    // O índice de versões é descartável e não pode falhar a ingestão.
+  }
+}
+
+export async function checkUfUpdates(
+  ufs: string[],
+  dir: string,
+  fetchFn: FetchLike = fetch
+): Promise<Record<string, { atualizacaoDisponivel: boolean; versaoLocal: string | null }>> {
+  const versoes = await readUfVersions(dir);
+  const entradas = await Promise.all(ufs.map(async uf => {
+    const chave = normalizeUf(uf);
+    const local = versoes[chave];
+    if (!local) return [chave, { atualizacaoDisponivel: false, versaoLocal: null }] as const;
+
+    try {
+      const resposta = await fetchFn(zipUrlForUf(chave), { method: 'HEAD' });
+      if (!resposta.ok) {
+        return [chave, { atualizacaoDisponivel: false, versaoLocal: local.baixadoEm }] as const;
+      }
+      return [chave, {
+        atualizacaoDisponivel: metaMatches(local, metaFromResponse(resposta)) === false,
+        versaoLocal: local.baixadoEm
+      }] as const;
+    } catch {
+      return [chave, { atualizacaoDisponivel: false, versaoLocal: local.baixadoEm }] as const;
+    }
+  }));
+  return Object.fromEntries(entradas);
 }
 
 function formatBytes(bytes: number): string {
@@ -363,7 +442,7 @@ export class CnefeDownloadManager {
         : {};
       let request = await this.request(url, { headers: resumeHeaders }, signal);
       let append = false;
-      if (resumeBytes > 0 && request.response.status === 206 && savedMeta && matchesPartMeta(savedMeta, getPartMeta(request.response))) {
+      if (resumeBytes > 0 && request.response.status === 206 && savedMeta && metaMatches(savedMeta, metaFromResponse(request.response)) === true) {
         append = true;
       } else if (resumeBytes > 0 && request.response.status === 206) {
         try {
@@ -396,7 +475,7 @@ export class CnefeDownloadManager {
         request.stopTimeout();
         throw new Error('IBGE não informou o tamanho do arquivo; não é seguro concluir o download.');
       }
-      const responseMeta = getPartMeta(request.response);
+      const responseMeta = metaFromResponse(request.response);
       await this.writePartMeta(partMetaPath, responseMeta);
       const canResume = Boolean(getResumeValidator(responseMeta));
       let written: number;
@@ -420,6 +499,7 @@ export class CnefeDownloadManager {
       await this.reloadIndex(stats => {
         this.setProgress(uf, 'ingerindo', total, total, `Ingerindo CSV no SQLite: ${stats.indexedRows} linhas.`);
       });
+      await writeUfVersion(this.dir, uf, responseMeta, new Date().toISOString());
       this.setProgress(uf, 'pronto', total, total, 'CNEFE pronto.');
     } finally {
       await rm(zipPath, { force: true });
