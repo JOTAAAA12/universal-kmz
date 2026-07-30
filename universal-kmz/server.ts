@@ -16,8 +16,14 @@ import {
   isPlaceholderGoogleKey,
   resolveGeocodeMode
 } from './src/geocoder';
-import { loadCnefeIndex, type CnefeIndex, type CnefeIndexStats } from './src/cnefeIndex';
-import { CnefeDownloadManager } from './src/cnefeDownloader';
+import {
+  getCnefeIndexedUfStats,
+  loadCnefeIndex,
+  resolveCnefeDir,
+  type CnefeIndex,
+  type CnefeIndexStats
+} from './src/cnefeIndex';
+import { checkUfUpdates, CnefeDownloadManager } from './src/cnefeDownloader';
 import { createPersistentGeocodeCache, registerGeocodeCacheShutdown } from './src/geocodeCache';
 import {
   createPersistentGeocodeJobStore,
@@ -500,11 +506,81 @@ async function startServer() {
     });
   });
 
+  const getCnefeUpdateBadges = async (ufs: readonly string[]) => {
+    const indexadas = [...new Set(ufs.map(uf => uf.toUpperCase()))];
+    const semAtualizacao: Record<string, { atualizacaoDisponivel: boolean; versaoLocal: string | null }> = Object.fromEntries(
+      indexadas.map(uf => [uf, { atualizacaoDisponivel: false, versaoLocal: null }])
+    );
+    if (indexadas.length === 0) return semAtualizacao;
+
+    const abortController = new AbortController();
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const atualizacoes = await Promise.race([
+        checkUfUpdates(
+          indexadas,
+          resolveCnefeDir(),
+          (input, init) => fetch(input, { ...init, signal: abortController.signal })
+        ),
+        new Promise<typeof semAtualizacao>(resolve => {
+          timeoutId = setTimeout(() => {
+            abortController.abort();
+            resolve(semAtualizacao);
+          }, 750);
+        })
+      ]);
+      const atualizacoesPorUf = new Map(
+        Object.entries(atualizacoes).map(([uf, atualizacao]) => [uf.toUpperCase(), atualizacao])
+      );
+      return Object.fromEntries(
+        indexadas.map(uf => [uf, atualizacoesPorUf.get(uf) ?? semAtualizacao[uf]])
+      );
+    } catch {
+      return semAtualizacao;
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
+      abortController.abort();
+    }
+  };
+
   app.get('/api/cnefe/estados', async (_req, res) => {
     try {
-      return res.json({ estados: await cnefeDownloader.listStates() });
+      const [estados, stats] = await Promise.all([
+        cnefeDownloader.listStates(),
+        getCnefeIndexedUfStats(resolveCnefeDir())
+      ]);
+      const indexadas = estados
+        .filter(estado => estado.estado === 'pronto')
+        .map(estado => estado.uf.toUpperCase());
+      const atualizacoes = await getCnefeUpdateBadges(indexadas);
+      const statsPorUf = new Map(stats.map(stat => [stat.uf.toUpperCase(), stat]));
+
+      return res.json({
+        estados: estados.map(estado => {
+          const uf = estado.uf.toUpperCase();
+          const atualizacao = atualizacoes[uf];
+          return {
+            ...estado,
+            linhas: statsPorUf.get(uf)?.rows ?? 0,
+            atualizacao_disponivel: atualizacao?.atualizacaoDisponivel ?? false,
+            versao_local: atualizacao?.versaoLocal ?? null
+          };
+        })
+      });
     } catch (err: any) {
       return res.status(500).json({ error: err.message || 'Falha ao listar estados CNEFE.' });
+    }
+  });
+
+  app.get('/api/cnefe/atualizacoes', async (_req, res) => {
+    try {
+      const estados = await cnefeDownloader.listStates();
+      const indexadas = estados
+        .filter(estado => estado.estado === 'pronto')
+        .map(estado => estado.uf.toUpperCase());
+      return res.json(await getCnefeUpdateBadges(indexadas));
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Falha ao consultar atualizações CNEFE.' });
     }
   });
 

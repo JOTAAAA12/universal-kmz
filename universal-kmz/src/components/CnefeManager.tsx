@@ -17,8 +17,18 @@ interface CnefeEstado {
   nome: string;
   estado: CnefeEstadoStatus;
   linhas?: number;
+  atualizacao_disponivel?: boolean;
+  versao_local?: string | null;
   tamanho_estimado?: number | string | null;
   progresso?: CnefeProgress;
+}
+
+type CnefeAction = 'download' | 'update' | 'cancelar' | 'remove';
+type CnefeConfirmableAction = Exclude<CnefeAction, 'cancelar'>;
+
+interface CnefeActionConfirmation {
+  uf: string;
+  action: CnefeConfirmableAction;
 }
 
 interface CnefeDisco {
@@ -47,8 +57,15 @@ function formatBytes(value?: number | null): string {
 }
 
 function formatRows(value?: number): string {
-  if (!Number.isFinite(value || 0) || !value) return 'sem linhas indexadas';
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 'linhas desconhecidas';
   return `${value.toLocaleString('pt-BR')} linhas`;
+}
+
+function formatVersion(value?: string | null): string {
+  if (!value) return 'versão desconhecida';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'versão desconhecida';
+  return `versão ${date.toLocaleDateString('pt-BR')}`;
 }
 
 function getPercent(progress?: CnefeProgress): number {
@@ -71,6 +88,16 @@ function getStatusClass(status: CnefeEstadoStatus): string {
   return 'border-slate-200 bg-slate-50 text-slate-600';
 }
 
+function getConfirmationMessage(item: CnefeEstado, action: CnefeConfirmableAction): string {
+  if (action === 'update') {
+    return `Atualizar o CNEFE de ${item.nome} (${item.uf})? A reingestão leva vários minutos e a base ficará indisponível durante o processo.`;
+  }
+  if (action === 'remove') {
+    return `Remover o CSV e as linhas indexadas do CNEFE de ${item.nome} (${item.uf})?`;
+  }
+  return `Baixar o CNEFE de ${item.nome} (${item.uf})? Estados grandes ocupam vários GB em disco; SP pode passar de 1 GB compactado e vários GB indexado.`;
+}
+
 async function readJson<T>(response: Response): Promise<T> {
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -87,8 +114,14 @@ export default function CnefeManager() {
   const [busyUf, setBusyUf] = useState('');
   const [error, setError] = useState('');
   const [toast, setToast] = useState('');
+  const [pendingConfirmation, setPendingConfirmation] = useState<CnefeActionConfirmation | null>(null);
 
   const hasActiveDownload = estados.some(item => item.estado === 'baixando' || item.estado === 'ingerindo');
+  const totalLinhas = useMemo(() => estados.reduce((total, item) => (
+    item.estado === 'pronto' && typeof item.linhas === 'number' && Number.isFinite(item.linhas)
+      ? total + item.linhas
+      : total
+  ), 0), [estados]);
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
@@ -98,9 +131,12 @@ export default function CnefeManager() {
         fetch('/api/cnefe/estados'),
         fetch('/api/cnefe/disco'),
       ]);
-      const estadosPayload = await readJson<CnefeEstado[]>(estadosResponse);
+      // A rota devolve { estados: [...] }; aceitar array puro também mantém
+      // compatibilidade caso o envelope mude.
+      const estadosPayload = await readJson<CnefeEstado[] | { estados?: CnefeEstado[] }>(estadosResponse);
       const discoPayload = await readJson<CnefeDisco>(discoResponse);
-      setEstados(Array.isArray(estadosPayload) ? estadosPayload : []);
+      const lista = Array.isArray(estadosPayload) ? estadosPayload : estadosPayload?.estados;
+      setEstados(Array.isArray(lista) ? lista : []);
       setDisco(discoPayload || {});
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Falha ao carregar estados CNEFE.');
@@ -127,36 +163,36 @@ export default function CnefeManager() {
     })).filter(region => region.estados.length > 0);
   }, [estados]);
 
-  const runAction = async (uf: string, action: 'download' | 'cancelar' | 'remove') => {
+  const runAction = async (uf: string, action: CnefeAction) => {
     const item = estados.find(estado => estado.uf === uf);
     if (!item) return;
-    if (action === 'download') {
-      const confirmed = window.confirm(`Baixar o CNEFE de ${item.nome} (${uf})? Estados grandes ocupam vários GB em disco; SP pode passar de 1 GB compactado e vários GB indexado.`);
-      if (!confirmed) return;
-    }
-    if (action === 'remove') {
-      const confirmed = window.confirm(`Remover o CSV e as linhas indexadas do CNEFE de ${item.nome} (${uf})?`);
-      if (!confirmed) return;
-    }
 
     setBusyUf(uf);
     setError('');
     setToast('');
     try {
-      const path = action === 'download'
+      const path = action === 'download' || action === 'update'
         ? `/api/cnefe/estados/${uf}/download`
         : action === 'cancelar'
           ? `/api/cnefe/estados/${uf}/cancelar`
           : `/api/cnefe/estados/${uf}`;
       const response = await fetch(path, { method: action === 'remove' ? 'DELETE' : 'POST' });
       await readJson<Record<string, unknown>>(response);
-      setToast(action === 'download' ? `Download de ${uf} enfileirado.` : action === 'cancelar' ? `Download de ${uf} cancelado.` : `Base de ${uf} removida.`);
+      setToast(action === 'update' ? `Atualização de ${uf} enfileirada.` : action === 'download' ? `Download de ${uf} enfileirado.` : action === 'cancelar' ? `Download de ${uf} cancelado.` : `Base de ${uf} removida.`);
       await load(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Falha ao executar operação CNEFE.');
     } finally {
       setBusyUf('');
     }
+  };
+
+  const requestAction = (uf: string, action: CnefeAction) => {
+    if (action === 'cancelar') {
+      void runAction(uf, action);
+      return;
+    }
+    setPendingConfirmation({ uf, action });
   };
 
   return (
@@ -178,9 +214,10 @@ export default function CnefeManager() {
         <div className="rounded border border-slate-300 bg-white p-3">
           <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-slate-500">
             <Database className="h-3.5 w-3.5" />
-            CNEFE local
+            Linhas CNEFE
           </div>
-          <div className="mt-1 text-sm font-bold text-slate-800">{formatBytes(disco.usado_cnefe_bytes)}</div>
+          <div className="mt-1 text-sm font-bold text-slate-800">{formatRows(totalLinhas)}</div>
+          <div className="mt-0.5 text-[11px] text-slate-500">{formatBytes(disco.usado_cnefe_bytes)} ocupados</div>
         </div>
       </div>
 
@@ -208,6 +245,7 @@ export default function CnefeManager() {
                 const percent = getPercent(progress);
                 const busy = busyUf === item.uf;
                 const active = item.estado === 'baixando' || item.estado === 'ingerindo';
+                const confirmation = pendingConfirmation?.uf === item.uf ? pendingConfirmation : null;
                 return (
                   <article key={item.uf} className="rounded border border-slate-300 bg-white p-3">
                     <div className="flex items-start justify-between gap-3">
@@ -216,9 +254,13 @@ export default function CnefeManager() {
                           <span className="font-mono text-sm font-black text-slate-900">{item.uf}</span>
                           <span className="truncate text-sm font-semibold text-slate-700">{item.nome}</span>
                           <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase ${getStatusClass(item.estado)}`}>{getStatusLabel(item)}</span>
+                          {item.estado === 'pronto' && item.atualizacao_disponivel && (
+                            <span role="status" aria-live="polite" className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-bold uppercase text-amber-700">Atualização disponível</span>
+                          )}
                         </div>
                         <div className="mt-1 text-[11px] text-slate-500">
                           {formatRows(item.linhas)}
+                          {item.estado === 'pronto' ? ` · ${formatVersion(item.versao_local)}` : ''}
                           {item.tamanho_estimado ? ` · estimado ${typeof item.tamanho_estimado === 'number' ? formatBytes(item.tamanho_estimado) : item.tamanho_estimado}` : ''}
                         </div>
                       </div>
@@ -236,19 +278,38 @@ export default function CnefeManager() {
                       </div>
                     )}
 
+                    {confirmation && (
+                      <div role="region" aria-label={`Confirmação para ${item.uf}`} className="mt-3 rounded border border-amber-200 bg-amber-50 p-2 text-[11px] text-amber-900">
+                        <p>{getConfirmationMessage(item, confirmation.action)}</p>
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          <button type="button" onClick={() => { setPendingConfirmation(null); void runAction(item.uf, confirmation.action); }} disabled={busy} className="rounded border border-amber-300 bg-white px-2 py-1 text-[10px] font-bold uppercase text-amber-800 disabled:opacity-50">
+                            Confirmar
+                          </button>
+                          <button type="button" onClick={() => setPendingConfirmation(null)} className="rounded border border-amber-200 bg-transparent px-2 py-1 text-[10px] font-bold uppercase text-amber-800">
+                            Cancelar
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
                     <div className="mt-3 flex flex-wrap gap-2">
                       {active ? (
-                        <button type="button" onClick={() => void runAction(item.uf, 'cancelar')} disabled={busy} className="inline-flex items-center gap-1 rounded border border-rose-200 bg-rose-50 px-2 py-1 text-[10px] font-bold uppercase text-rose-700 disabled:opacity-60">
+                        <button type="button" onClick={() => requestAction(item.uf, 'cancelar')} disabled={busy} className="inline-flex items-center gap-1 rounded border border-rose-200 bg-rose-50 px-2 py-1 text-[10px] font-bold uppercase text-rose-700 disabled:opacity-60">
                           {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <XCircle className="h-3.5 w-3.5" />}
                           Cancelar
                         </button>
+                      ) : item.estado === 'pronto' && item.atualizacao_disponivel ? (
+                        <button type="button" onClick={() => requestAction(item.uf, 'update')} disabled={busy} className="inline-flex items-center gap-1 rounded border border-amber-200 bg-amber-50 px-2 py-1 text-[10px] font-bold uppercase text-amber-700 disabled:opacity-50">
+                          {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                          Atualizar
+                        </button>
                       ) : (
-                        <button type="button" onClick={() => void runAction(item.uf, 'download')} disabled={busy || item.estado === 'pronto'} className="inline-flex items-center gap-1 rounded border border-indigo-200 bg-indigo-50 px-2 py-1 text-[10px] font-bold uppercase text-indigo-700 disabled:opacity-50">
+                        <button type="button" onClick={() => requestAction(item.uf, 'download')} disabled={busy || item.estado === 'pronto'} className="inline-flex items-center gap-1 rounded border border-indigo-200 bg-indigo-50 px-2 py-1 text-[10px] font-bold uppercase text-indigo-700 disabled:opacity-50">
                           {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
                           Baixar
                         </button>
                       )}
-                      <button type="button" onClick={() => void runAction(item.uf, 'remove')} disabled={busy || active || item.estado === 'ausente'} className="inline-flex items-center gap-1 rounded border border-slate-200 bg-white px-2 py-1 text-[10px] font-bold uppercase text-slate-600 hover:bg-slate-50 disabled:opacity-50">
+                      <button type="button" onClick={() => requestAction(item.uf, 'remove')} disabled={busy || active || item.estado === 'ausente'} className="inline-flex items-center gap-1 rounded border border-slate-200 bg-white px-2 py-1 text-[10px] font-bold uppercase text-slate-600 hover:bg-slate-50 disabled:opacity-50">
                         <Trash2 className="h-3.5 w-3.5" />
                         Remover
                       </button>

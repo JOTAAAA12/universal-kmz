@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { access, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { access, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { createServer } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -22,6 +24,81 @@ async function fileExists(filePath: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+function getFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.once('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const address = probe.address();
+      if (!address || typeof address === 'string') {
+        probe.close();
+        reject(new Error('Não foi possível reservar porta para o servidor de teste.'));
+        return;
+      }
+      probe.close(error => error ? reject(error) : resolve(address.port));
+    });
+  });
+}
+
+async function getJson<T>(url: string): Promise<T> {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Servidor de teste respondeu ${response.status} para ${url}.`);
+  }
+  return response.json() as Promise<T>;
+}
+
+async function waitForApi(url: string): Promise<void> {
+  for (let attempt = 0; attempt < 50; attempt++) {
+    try {
+      if ((await fetch(url)).ok) return;
+    } catch {
+      // O servidor ainda está iniciando.
+    }
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  throw new Error('Servidor de teste não respondeu a tempo.');
+}
+
+async function assertCnefeApiContract(tempRoot: string): Promise<void> {
+  const port = await getFreePort();
+  const cnefeDir = path.join(tempRoot, 'cnefe-api');
+  await mkdir(cnefeDir, { recursive: true });
+
+  const server = spawn(process.execPath, ['--import', 'tsx', 'server.ts'], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      HOST: '127.0.0.1',
+      PORT: String(port),
+      CNEFE_DIR: cnefeDir,
+      GEOCODE_CACHE_DIR: path.join(tempRoot, 'geocode-api')
+    },
+    stdio: 'ignore'
+  });
+  const base = `http://127.0.0.1:${port}`;
+
+  try {
+    await waitForApi(`${base}/api/cnefe/estados`);
+    const estadosResponse = await getJson<{ estados: Array<Record<string, unknown>> }>(`${base}/api/cnefe/estados`);
+    const estados = estadosResponse.estados;
+    assert.ok(Array.isArray(estados));
+    assert.ok(estados.length > 0, 'listagem de estados CNEFE deve conter UFs');
+    assert.ok('atualizacao_disponivel' in estados[0], 'listagem deve trazer selo de atualizacao');
+    assert.ok('versao_local' in estados[0], 'listagem deve trazer versao local');
+
+    const atualizacoes = await getJson(`${base}/api/cnefe/atualizacoes`);
+    assert.equal(typeof atualizacoes, 'object');
+  } finally {
+    const exited = new Promise<void>(resolve => {
+      if (server.exitCode !== null) resolve();
+      else server.once('exit', () => resolve());
+    });
+    server.kill();
+    await exited;
   }
 }
 
@@ -105,6 +182,8 @@ try {
   assert.equal(await deleteSession(created.id, env), true);
   assert.equal(await deleteSession(created.id, env), false);
   assert.deepEqual(await listSessions(env), []);
+
+  await assertCnefeApiContract(tempDir);
 
   console.log('config and sessions regression passed');
 } finally {
