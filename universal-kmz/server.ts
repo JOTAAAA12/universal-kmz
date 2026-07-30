@@ -4,7 +4,6 @@ import fs from 'node:fs';
 import path from 'path';
 import * as crypto from 'crypto';
 import JSZip from 'jszip';
-import { createServer as createViteServer } from 'vite';
 
 import { parseKmlStringToResult } from './src/kmlParser';
 import { decodeKmlBuffer } from './src/kmlEncoding';
@@ -902,6 +901,7 @@ async function startServer() {
 
   // Development VS Production Routing serving web assets in the background
   if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',

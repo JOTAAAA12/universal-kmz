@@ -371,6 +371,21 @@ function ensureCellDegrees(db: DatabaseSync, cellDegrees: number, messages: stri
     return false;
   }
 
+  // Bancos anteriores à persistência de cellDegrees não têm a chave no meta, mas foram
+  // construídos com a mesma grade. Amostrar evita recalcular 22,9M linhas sem necessidade —
+  // o UPDATE é síncrono (node:sqlite) e travaria o processo por minutos.
+  const sample = db.prepare('SELECT lat, lng, cell_lat, cell_lng FROM enderecos LIMIT 50').all() as
+    { lat: number; lng: number; cell_lat: number; cell_lng: number }[];
+  const gradeConsistente = sample.every(row =>
+    cellCoordinate(Number(row.lat), cellDegrees) === Number(row.cell_lat) &&
+    cellCoordinate(Number(row.lng), cellDegrees) === Number(row.cell_lng));
+  if (gradeConsistente) {
+    writeMetaValue(db, META_CELL_DEGREES, String(cellDegrees));
+    return false;
+  }
+
+  // ponytail: recálculo síncrono bloqueia o boot em bases grandes; só ocorre quando a grade
+  // realmente mudou. Se isso virar rotina, fatiar em lotes com yield entre eles.
   const recalculateCells = db.prepare(`
     UPDATE enderecos
     SET
