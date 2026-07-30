@@ -18,6 +18,7 @@ const regressions: readonly Regression[] = [
   { name: 'cnefe', file: 'scripts/cnefe-regression.ts' },
   { name: 'uf-bounds', file: 'scripts/uf-bounds-regression.ts' },
   { name: 'cnefe-downloader', file: 'scripts/cnefe-downloader-regression.ts' },
+  { name: 'cnefe-cobertura', file: 'scripts/cnefe-cobertura-regression.ts' },
   { name: 'cache-and-jobs', file: 'scripts/cache-and-jobs-regression.ts' },
   { name: 'upload-contract', file: 'scripts/upload-contract-regression.ts' },
   { name: 'export-contract', file: 'scripts/export-contract-regression.ts' },

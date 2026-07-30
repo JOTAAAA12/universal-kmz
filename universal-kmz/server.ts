@@ -23,7 +23,7 @@ import {
   type CnefeIndex,
   type CnefeIndexStats
 } from './src/cnefeIndex';
-import { checkUfUpdates, CnefeDownloadManager } from './src/cnefeDownloader';
+import { checkUfUpdates, CnefeDownloadManager, getRemoteUfSize } from './src/cnefeDownloader';
 import { createPersistentGeocodeCache, registerGeocodeCacheShutdown } from './src/geocodeCache';
 import {
   createPersistentGeocodeJobStore,
@@ -627,6 +627,15 @@ async function startServer() {
       return res.json(await cnefeDownloader.disk());
     } catch (err: any) {
       return res.status(500).json({ error: err.message || 'Falha ao consultar disco CNEFE.' });
+    }
+  });
+
+  app.get('/api/cnefe/estados/:uf/tamanho', async (req, res) => {
+    try {
+      const bytes = await getRemoteUfSize(String(req.params.uf));
+      return res.json({ uf: String(req.params.uf).toUpperCase(), bytes });
+    } catch {
+      return res.json({ uf: String(req.params.uf).toUpperCase(), bytes: null });
     }
   });
 

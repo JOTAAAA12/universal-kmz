@@ -44,7 +44,7 @@ const REGIOES: Array<{ nome: string; ufs: string[] }> = [
   { nome: 'Sul', ufs: ['PR', 'RS', 'SC'] },
 ];
 
-function formatBytes(value?: number | null): string {
+export function formatBytes(value?: number | null): string {
   if (!Number.isFinite(value || 0) || !value) return 'indisponível';
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
   let amount = value;

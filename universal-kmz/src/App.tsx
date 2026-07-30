@@ -20,9 +20,19 @@ import SessionManager, { SavedSessionMeta } from './components/SessionManager';
 import WorkflowNav from './components/WorkflowNav';
 import GeocodeControlBar from './components/GeocodeControlBar';
 import WorkspaceTabs, { WorkspaceTab } from './components/WorkspaceTabs';
+import CoberturaAviso from './components/CoberturaAviso';
+import { formatBytes } from './components/CnefeManager';
 import { publishWorkspaceSnapshot } from './components/ErrorBoundary';
 import { mergeExternalAddressRecord } from './addressConfidence';
 import { mergeGeocodedBatch } from './pericialMerge';
+import { detectUfs } from './ufBounds';
+import {
+  CnefeEstado,
+  UfAusente,
+  isRecord,
+  normalizarEstadosCnefe,
+  ufsSemCobertura
+} from './cnefeCobertura';
 
 interface AppSessionPayload {
   result: ParserResult;
@@ -33,6 +43,39 @@ interface AppSessionPayload {
   toleranceMatch: number;
   activeWorkspaceTab: WorkspaceTab;
 }
+
+interface CoberturaCnefe {
+  ufsAusentes: UfAusente[];
+  espacoLivre: string;
+}
+
+interface GeocodeRunOptions {
+  coordinates?: Coordinate[];
+  startIndex?: number;
+  allowResume?: boolean;
+}
+
+const carregarEstadosCnefe = async (): Promise<CnefeEstado[]> => {
+  const response = await fetch('/api/cnefe/estados');
+  if (!response.ok) {
+    throw new Error('Não foi possível consultar a cobertura CNEFE.');
+  }
+  return normalizarEstadosCnefe(await response.json());
+};
+
+// GET /api/cnefe/disco devolve { livre_bytes, usado_cnefe_bytes } — bytes crus.
+// Nunca lança: o espaço livre é informativo e não pode suprimir o aviso de cobertura.
+const carregarEspacoLivreCnefe = async (): Promise<string> => {
+  try {
+    const response = await fetch('/api/cnefe/disco');
+    if (!response.ok) return 'indisponível';
+    const payload: unknown = await response.json();
+    if (!isRecord(payload) || typeof payload.livre_bytes !== 'number') return 'indisponível';
+    return formatBytes(payload.livre_bytes);
+  } catch {
+    return 'indisponível';
+  }
+};
 
 export default function App() {
   // Config state
@@ -52,6 +95,10 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sessionsOpen, setSessionsOpen] = useState(false);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const [coberturaAviso, setCoberturaAviso] = useState<CoberturaCnefe | null>(null);
+  const [downloadsCnefe, setDownloadsCnefe] = useState<Readonly<Record<string, string>>>({});
+  const [regeocodificacaoCnefePendente, setRegeocodificacaoCnefePendente] = useState(false);
+  const coberturaRequestRef = useRef(0);
 
   // Active geocoding loop state
   const [isGeocoding, setIsGeocoding] = useState(false);
@@ -131,6 +178,53 @@ export default function App() {
     });
   };
 
+  const verificarCoberturaCnefe = async (parsed: ParserResult) => {
+    const requestId = ++coberturaRequestRef.current;
+    const ufsDetectadas = detectUfs(
+      parsed.pontos
+        .filter(ponto => Number.isFinite(ponto.latitude) && Number.isFinite(ponto.longitude))
+        .map(ponto => ({ lat: ponto.latitude, lng: ponto.longitude }))
+    );
+
+    setCoberturaAviso(null);
+    setDownloadsCnefe({});
+    setRegeocodificacaoCnefePendente(false);
+
+    if (ufsDetectadas.length === 0) return;
+
+    try {
+      const estados = await carregarEstadosCnefe();
+      if (requestId !== coberturaRequestRef.current) return;
+
+      const ufsAusentes = ufsSemCobertura(ufsDetectadas, estados);
+      if (ufsAusentes.length === 0) return;
+
+      const espacoLivre = await carregarEspacoLivreCnefe();
+      if (requestId !== coberturaRequestRef.current) return;
+
+      // Tamanho real por HEAD no IBGE: sem ele o usuário decidiria um download
+      // de vários GB às cegas. Só as UFs exibidas são consultadas.
+      const comTamanho = await Promise.all(ufsAusentes.map(async item => {
+        if (item.tamanho) return item;
+        try {
+          const resposta = await fetch(`/api/cnefe/estados/${item.uf}/tamanho`);
+          const dados = await resposta.json();
+          const bytes = typeof dados?.bytes === 'number' ? dados.bytes : null;
+          return bytes ? { ...item, tamanho: formatBytes(bytes) } : item;
+        } catch {
+          return item;
+        }
+      }));
+      if (requestId !== coberturaRequestRef.current) return;
+
+      setCoberturaAviso({ ufsAusentes: comTamanho, espacoLivre });
+    } catch {
+      if (requestId === coberturaRequestRef.current) {
+        setCoberturaAviso(null);
+      }
+    }
+  };
+
   const handleUploadSuccess = (parsed: ParserResult, orig: { name: string; size: number; raw: string }) => {
     setResult(parsed);
     setOriginalFile(orig);
@@ -144,6 +238,7 @@ export default function App() {
     setGeocodeJobId('');
     setGeocodeJobStatus('idle');
     jobAppliedCountRef.current = 0;
+    void verificarCoberturaCnefe(parsed);
   };
 
   const analyzePendingCoordinates = (parsed: ParserResult, modeToUse = geocodeMode) => {
@@ -184,6 +279,7 @@ export default function App() {
     setGeocodeJobId('');
     setGeocodeJobStatus('idle');
     jobAppliedCountRef.current = 0;
+    return coordsArray;
   };
 
   const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -232,10 +328,10 @@ export default function App() {
     }
   };
 
-  const startOrResumeGeocodeJob = async (controller: AbortController) => {
+  const startOrResumeGeocodeJob = async (controller: AbortController, coordinates: Coordinate[], allowResume: boolean) => {
     cancelGeocodingRef.current = false;
 
-    if (geocodeJobId && geocodeJobStatus === 'paused') {
+    if (allowResume && geocodeJobId && geocodeJobStatus === 'paused') {
       const resumeResponse = await fetch(`/api/geocode/jobs/${geocodeJobId}/resume`, {
         method: 'POST',
         signal: signalWithTimeout(controller, 15_000)
@@ -252,7 +348,7 @@ export default function App() {
     const response = await fetch('/api/geocode/jobs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ coordinates: pendingCoords }),
+      body: JSON.stringify({ coordinates }),
       signal: signalWithTimeout(controller, 30_000)
     });
     const data = await response.json();
@@ -405,8 +501,12 @@ export default function App() {
   };
 
   // Run/Resume batch geocoding loop
-  const handleStartGeocoding = async () => {
-    if (!result || pendingCoords.length === 0) return;
+  const handleStartGeocoding = async (options: GeocodeRunOptions = {}) => {
+    const coordinates = options.coordinates || pendingCoords;
+    const startIndex = options.startIndex ?? currentIndex;
+    const allowResume = options.allowResume ?? true;
+
+    if (!result || coordinates.length === 0) return;
     setIsGeocoding(true);
     setGeocodeError('');
     cancelGeocodingRef.current = false;
@@ -414,14 +514,14 @@ export default function App() {
     const geocodeController = new AbortController();
     geocodeAbortControllerRef.current = geocodeController;
 
-    let idx = currentIndex;
+    let idx = startIndex;
 
     // Record audit run starting
-    addAuditLog('GEOCODE_START', 'Processamento API', `Registros a processar: ${pendingCoords.length}`, `Indice atual: ${idx}`);
+    addAuditLog('GEOCODE_START', 'Processamento API', `Registros a processar: ${coordinates.length}`, `Indice atual: ${idx}`);
 
-    if (pendingCoords.length > 20) {
+    if (coordinates.length > 20) {
       try {
-        await startOrResumeGeocodeJob(geocodeController);
+        await startOrResumeGeocodeJob(geocodeController, coordinates, allowResume);
       } catch (e) {
         if (isAbortError(e)) return;
         const message = getRequestErrorMessage(e, 'Falha inesperada no job de geocodificação.');
@@ -436,8 +536,8 @@ export default function App() {
       return;
     }
 
-    while (idx < pendingCoords.length && !cancelGeocodingRef.current) {
-      const coord = pendingCoords[idx];
+    while (idx < coordinates.length && !cancelGeocodingRef.current) {
+      const coord = coordinates[idx];
       setGeocodeProgress(idx + 1);
       setCurrentIndex(idx + 1);
 
@@ -494,11 +594,91 @@ export default function App() {
       geocodeAbortControllerRef.current = null;
       setIsGeocoding(false);
       if (cancelGeocodingRef.current) {
-        addAuditLog('GEOCODE_PAUSED', 'Processamento API', `Pausado em ${currentIndex}`, `Total: ${pendingCoords.length}`, 'ALERTA');
+        addAuditLog('GEOCODE_PAUSED', 'Processamento API', `Pausado em ${currentIndex}`, `Total: ${coordinates.length}`, 'ALERTA');
       } else {
-        addAuditLog('GEOCODE_COMPLETE', 'Processamento API', '-', `Processados: ${pendingCoords.length}`, 'SUCESSO');
+        addAuditLog('GEOCODE_COMPLETE', 'Processamento API', '-', `Processados: ${coordinates.length}`, 'SUCESSO');
       }
     }
+  };
+
+  useEffect(() => {
+    const ufsEmAcompanhamento = Object.entries(downloadsCnefe)
+      .filter(([, estado]) => estado !== 'erro')
+      .map(([uf]) => uf);
+
+    if (ufsEmAcompanhamento.length === 0) return;
+
+    let ativo = true;
+    let requisicaoEmAndamento = false;
+    const ufsConcluidas = new Set<string>();
+
+    const atualizarDownloads = async () => {
+      if (requisicaoEmAndamento) return;
+      requisicaoEmAndamento = true;
+
+      try {
+        const estadosPorUf = new Map<string, string>(
+          (await carregarEstadosCnefe()).map(estado => [estado.uf, estado.estado])
+        );
+        if (!ativo) return;
+
+        const concluidasAgora = ufsEmAcompanhamento.filter(uf => estadosPorUf.get(uf) === 'pronto' && !ufsConcluidas.has(uf));
+        concluidasAgora.forEach(uf => ufsConcluidas.add(uf));
+
+        setDownloadsCnefe(atuais => {
+          const proximos: [string, string][] = Object.entries<string>(atuais)
+            .filter(([uf]) => !ufsConcluidas.has(uf))
+            .map(([uf, estado]): [string, string] => [uf, estadosPorUf.get(uf) || estado]);
+          const mudou = proximos.length !== Object.keys(atuais).length
+            || proximos.some(([uf, estado]) => atuais[uf] !== estado);
+          return mudou ? Object.fromEntries(proximos) : atuais;
+        });
+
+        if (concluidasAgora.length > 0) {
+          setCoberturaAviso(atual => atual
+            ? { ...atual, ufsAusentes: atual.ufsAusentes.filter(({ uf }) => !ufsConcluidas.has(uf)) }
+            : atual
+          );
+          setRegeocodificacaoCnefePendente(true);
+        }
+      } catch {
+        // A análise permanece disponível se o acompanhamento da fila falhar temporariamente.
+      } finally {
+        requisicaoEmAndamento = false;
+      }
+    };
+
+    void atualizarDownloads();
+    const intervalId = window.setInterval(() => void atualizarDownloads(), 2_000);
+
+    return () => {
+      ativo = false;
+      window.clearInterval(intervalId);
+    };
+  }, [downloadsCnefe]);
+
+  useEffect(() => {
+    if (!regeocodificacaoCnefePendente || isGeocoding || !result) return;
+
+    const coordinates = analyzePendingCoordinates(result);
+    setCurrentIndex(0);
+    setGeocodeProgress(0);
+    setRegeocodificacaoCnefePendente(false);
+    void handleStartGeocoding({ coordinates, startIndex: 0, allowResume: false });
+  }, [geocodeMode, isGeocoding, regeocodificacaoCnefePendente, result]);
+
+  const handleBaixarBaseCnefe = async (uf: string) => {
+    const response = await fetch(`/api/cnefe/estados/${uf}/download`, { method: 'POST' });
+    const payload: unknown = await response.json().catch(() => null);
+
+    if (!response.ok) {
+      const mensagem = isRecord(payload) && typeof payload.error === 'string'
+        ? payload.error
+        : 'Não foi possível enfileirar o download da base CNEFE.';
+      throw new Error(mensagem);
+    }
+
+    setDownloadsCnefe(atuais => ({ ...atuais, [uf]: 'enfileirado' }));
   };
 
   const handlePauseGeocoding = () => {
@@ -549,6 +729,7 @@ export default function App() {
   };
 
   const resetWorkspace = () => {
+    coberturaRequestRef.current += 1;
     setResult(null);
     setOriginalFile(null);
     setActiveWorkspaceTab('summary');
@@ -557,6 +738,9 @@ export default function App() {
     setGeocodeJobId('');
     setGeocodeJobStatus('idle');
     setHasUnsavedChanges(false);
+    setCoberturaAviso(null);
+    setDownloadsCnefe({});
+    setRegeocodificacaoCnefePendente(false);
     jobAppliedCountRef.current = 0;
   };
 
@@ -602,6 +786,7 @@ export default function App() {
     if (hasUnsavedChanges && !window.confirm('Há alterações não salvas. Abrir outra sessão mesmo assim?')) {
       return;
     }
+    coberturaRequestRef.current += 1;
     setResult(payload.result);
     setOriginalFile(payload.originalFile || { name: session.nome, size: 0, raw: '' });
     setGeocodeMode(payload.geocodeMode || 'COMPLETO');
@@ -615,6 +800,9 @@ export default function App() {
     setGeocodeJobId('');
     setGeocodeJobStatus('idle');
     setHasUnsavedChanges(false);
+    setCoberturaAviso(null);
+    setDownloadsCnefe({});
+    setRegeocodificacaoCnefePendente(false);
     jobAppliedCountRef.current = 0;
   };
 
@@ -661,6 +849,16 @@ export default function App() {
             />
 
             <ProviderStatus />
+
+            {coberturaAviso && (
+              <CoberturaAviso
+                ufsAusentes={coberturaAviso.ufsAusentes}
+                espacoLivre={coberturaAviso.espacoLivre}
+                statusPorUf={downloadsCnefe}
+                onBaixar={handleBaixarBaseCnefe}
+                onDispensar={() => setCoberturaAviso(null)}
+              />
+            )}
 
             <WorkspaceTabs activeTab={activeWorkspaceTab} onChange={setActiveWorkspaceTab} />
 

@@ -96,6 +96,31 @@ function zipUrlForUf(uf: string): string {
   return `${CNEFE_BASE_URL}${state.zip}`;
 }
 
+const remoteSizeCache = new Map<string, number>();
+
+/**
+ * Tamanho real do zip da UF no IBGE, por HEAD. Sem isso o aviso de cobertura
+ * só teria tamanho para SP e o usuário decidiria o download às cegas.
+ * Falha de rede devolve null — o aviso degrada, nunca some.
+ */
+export async function getRemoteUfSize(uf: string, fetchFn: FetchLike = fetch): Promise<number | null> {
+  const chave = uf.toUpperCase();
+  const cacheado = remoteSizeCache.get(chave);
+  if (typeof cacheado === 'number') return cacheado;
+  try {
+    const resposta = await fetchFn(zipUrlForUf(chave), {
+      method: 'HEAD',
+      signal: AbortSignal.timeout(5_000)
+    });
+    const bytes = Number(resposta.headers.get('content-length') || 0);
+    if (!Number.isFinite(bytes) || bytes <= 0) return null;
+    remoteSizeCache.set(chave, bytes);
+    return bytes;
+  } catch {
+    return null;
+  }
+}
+
 function parseTotalBytes(response: Response, resumeBytes: number): number | null {
   const range = response.headers.get('content-range');
   const rangeTotal = range?.match(/\/(\d+)$/)?.[1];
