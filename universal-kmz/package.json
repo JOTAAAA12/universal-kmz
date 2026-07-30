@@ -14,6 +14,7 @@
     "dist": "npm run build && electron-builder",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
+    "test": "tsx scripts/run-all-tests.ts",
     "test:precision": "tsx scripts/precision-regression.ts",
     "test:providers": "tsx scripts/provider-chain-regression.ts",
     "test:cnefe": "tsx scripts/cnefe-regression.ts",
@@ -26,7 +27,7 @@
     "test:pericial:parse": "tsx scripts/harness/pericial-parse-contract.ts",
     "test:pericial:export": "tsx scripts/harness/pericial-export-contract.ts",
     "test:pericial:merge": "tsx scripts/pericial-merge-regression.ts",
-    "test:pericial": "npm.cmd run test:pericial:parse && npm.cmd run test:pericial:export && npm.cmd run test:pericial:merge"
+    "test:pericial": "tsx scripts/harness/pericial-parse-contract.ts && tsx scripts/harness/pericial-export-contract.ts && tsx scripts/pericial-merge-regression.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

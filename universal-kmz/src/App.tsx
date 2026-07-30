@@ -36,9 +36,9 @@ interface AppSessionPayload {
 
 export default function App() {
   // Config state
-  const [apiKey, setApiKey] = useState(
-    process.env.GOOGLE_MAPS_BROWSER_KEY || ''
-  );
+  // A chave pública do Maps nunca vem no bundle: chega por GET /api/config no boot.
+  const [apiKey, setApiKey] = useState('');
+  const [mapId, setMapId] = useState('');
   const [processingType, setProcessingType] = useState('AUTO');
   const [geocodeMode, setGeocodeMode] = useState('COMPLETO');
   const [sampleInterval, setSampleInterval] = useState(100);
@@ -87,6 +87,21 @@ export default function App() {
 
   useEffect(() => () => {
     abortActiveGeocoding();
+  }, []);
+
+  // Boot: busca a chave pública do Maps e o Map ID no servidor. Falha em silêncio
+  // (o app segue usável sem mapa) e nunca sobrescreve uma chave já digitada.
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch('/api/config', { signal: controller.signal })
+      .then(res => (res.ok ? res.json() : null))
+      .then((config: { googleMapsBrowserKey?: string; googleMapsMapId?: string } | null) => {
+        if (!config) return;
+        if (config.googleMapsBrowserKey) setApiKey(prev => prev || config.googleMapsBrowserKey || '');
+        if (config.googleMapsMapId) setMapId(prev => prev || config.googleMapsMapId || '');
+      })
+      .catch(() => undefined);
+    return () => controller.abort();
   }, []);
 
   const markDirty = () => {
@@ -656,7 +671,7 @@ export default function App() {
               )}
 
               {activeWorkspaceTab === 'map' && (
-                <MapView result={result} apiKey={apiKey} />
+                <MapView result={result} apiKey={apiKey} mapId={mapId} />
               )}
 
               {activeWorkspaceTab === 'tables' && (

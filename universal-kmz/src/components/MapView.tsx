@@ -8,6 +8,7 @@ import { parseKmlCoordinates } from '../kmlParser';
 interface MapViewProps {
   result: ParserResult;
   apiKey: string;
+  mapId: string;
 }
 
 // Custom map bound fitter component inside APIProvider
@@ -83,13 +84,11 @@ function MapPolygon({ paths, color = '#10B981' }: { paths: google.maps.LatLngLit
   return null;
 }
 
-export default function MapView({ result, apiKey }: MapViewProps) {
+export default function MapView({ result, apiKey, mapId }: MapViewProps) {
   const [selectedItem, setSelectedItem] = useState<{ lat: number; lng: number; nome: string; des: string; extra: any } | null>(null);
   const [mapLoadError, setMapLoadError] = useState('');
 
-  // Fallback API Key check
-  const actualKey = apiKey || process.env.GOOGLE_MAPS_BROWSER_KEY || '';
-  const mapId = process.env.GOOGLE_MAPS_MAP_ID || '';
+  const actualKey = apiKey;
   const isKeyEmpty = !actualKey || actualKey === 'YOUR_API_KEY';
 
   useEffect(() => {
@@ -112,7 +111,7 @@ export default function MapView({ result, apiKey }: MapViewProps) {
         <h3 className="text-lg font-semibold text-slate-850">Visualização de Mapa Desativada</h3>
         <p className="text-sm text-slate-500 leading-relaxed">
           Para ver as feições do seu KML carregadas no mapa dinâmico do Google Maps, salve sua chave pública da plataforma em 
-          <b> Configurações Adicionais</b> ou adicione um segredo com o nome <code>GOOGLE_MAPS_BROWSER_KEY</code> no painel superior de Secrets.
+          <b> Configurações Adicionais</b> ou defina <code>GOOGLE_MAPS_BROWSER_KEY</code> no ambiente do servidor.
         </p>
         <div className="bg-slate-100 p-3 rounded-lg text-xs text-slate-400 font-mono text-left">
           Modo offline ativo: todos os dados seguem salvos e o download e auditoria funcionam normalmente!

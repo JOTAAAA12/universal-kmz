@@ -1,20 +1,38 @@
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
-import { defineConfig, loadEnv } from 'vite';
+import { defineConfig } from 'vite';
 
 export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, process.cwd(), '');
-  const browserKey = env.GOOGLE_MAPS_BROWSER_KEY || env.VITE_GOOGLE_MAPS_BROWSER_KEY || '';
-  const mapId = env.GOOGLE_MAPS_MAP_ID || env.VITE_GOOGLE_MAPS_MAP_ID || '';
+  const productionCsp = [
+    "default-src 'self'",
+    "base-uri 'none'",
+    "object-src 'none'",
+    "script-src 'self' https://*.googleapis.com https://*.gstatic.com",
+    "connect-src 'self' https://*.googleapis.com https://*.gstatic.com",
+    "img-src 'self' data: blob: https://*.googleapis.com https://*.gstatic.com",
+    "style-src 'self' 'unsafe-inline' https://*.googleapis.com",
+    "font-src 'self' data: https://*.gstatic.com",
+    "worker-src 'self' blob:",
+    "form-action 'self'",
+    "frame-ancestors 'none'"
+  ].join('; ');
 
   return {
-    plugins: [react(), tailwindcss()],
-    define: {
-      'process.env.GOOGLE_MAPS_BROWSER_KEY': JSON.stringify(browserKey),
-      'process.env.GOOGLE_MAPS_MAP_ID': JSON.stringify(mapId),
-      'process.env.GOOGLE_MAPS_PLATFORM_KEY': JSON.stringify(browserKey)
-    },
+    plugins: [
+      react(),
+      tailwindcss(),
+      {
+        name: 'production-content-security-policy',
+        transformIndexHtml(html: string) {
+          if (mode !== 'production') return html;
+          return html.replace(
+            '</head>',
+            `    <meta http-equiv="Content-Security-Policy" content="${productionCsp}" />\n  </head>`
+          );
+        }
+      }
+    ],
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),

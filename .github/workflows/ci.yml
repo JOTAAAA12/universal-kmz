@@ -1,0 +1,40 @@
+name: Qualidade
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+# O projeto vive em universal-kmz/; o workflow precisa ficar na raiz do repositório.
+defaults:
+  run:
+    working-directory: universal-kmz
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: universal-kmz/package-lock.json
+
+      - name: Instalar dependências
+        # O binário do Electron não é usado no CI; baixá-lo só adiciona rede fora do registry.
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+        run: npm ci
+
+      - name: Verificar tipos
+        run: npm run lint
+
+      - name: Executar regressões
+        run: npm test
+
+      - name: Gerar build
+        run: npm run build

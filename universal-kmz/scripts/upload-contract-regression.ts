@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import JSZip from 'jszip';
 
 const PORT = 3199;
@@ -23,12 +23,18 @@ async function waitForServer() {
   throw new Error('Servidor de teste nao ficou pronto em 30s.');
 }
 
-async function stopProcess(pid?: number) {
-  if (!pid) return;
+async function stopProcess(server: ChildProcess) {
+  if (!server.pid || server.exitCode !== null || server.signalCode !== null) return;
   await new Promise<void>(resolve => {
-    const killer = spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' });
-    killer.on('exit', () => resolve());
-    killer.on('error', () => resolve());
+    const timeout = setTimeout(resolve, 5000);
+    server.once('exit', () => {
+      clearTimeout(timeout);
+      resolve();
+    });
+    if (!server.kill()) {
+      clearTimeout(timeout);
+      resolve();
+    }
   });
 }
 
@@ -72,7 +78,7 @@ async function postUpload(name: string, content: string) {
   });
 }
 
-const server = spawn(process.env.ComSpec || 'cmd.exe', ['/c', 'npm.cmd', 'run', 'dev'], {
+const server = spawn(process.execPath, ['--import', 'tsx', 'server.ts'], {
   cwd: process.cwd(),
   env: {
     ...process.env,
@@ -81,8 +87,7 @@ const server = spawn(process.env.ComSpec || 'cmd.exe', ['/c', 'npm.cmd', 'run', 
     ALLOW_MOCK_GEOCODER: 'false',
     GOOGLE_MAPS_SERVER_KEY: ''
   },
-  stdio: 'ignore',
-  windowsHide: true
+  stdio: 'ignore'
 });
 
 try {
@@ -116,5 +121,5 @@ try {
 
   console.log('upload contract regression passed');
 } finally {
-  await stopProcess(server.pid);
+  await stopProcess(server);
 }

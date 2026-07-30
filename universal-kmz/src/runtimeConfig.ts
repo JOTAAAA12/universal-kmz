@@ -5,6 +5,10 @@ const KEEP_SECRET = '__KEEP__';
 
 export interface RuntimeConfig {
   googleServerKey: string;
+  /** Chave pública do Maps JavaScript API. Não é segredo: precisa chegar ao browser. */
+  googleMapsBrowserKey: string;
+  /** Map ID opcional de estilo do Google Maps. Não é segredo. */
+  googleMapsMapId: string;
   locationiqKey: string;
   geoapifyKey: string;
   nominatimEmail: string;
@@ -25,6 +29,8 @@ const SECRET_FIELDS = new Set<keyof RuntimeConfig>([
 
 const STRING_FIELDS = new Set<keyof RuntimeConfig>([
   'googleServerKey',
+  'googleMapsBrowserKey',
+  'googleMapsMapId',
   'locationiqKey',
   'geoapifyKey',
   'nominatimEmail',
@@ -49,6 +55,8 @@ function numberFromEnv(value: string | undefined, fallback: number): number {
 function configFromEnv(env: NodeJS.ProcessEnv = process.env): RuntimeConfig {
   return {
     googleServerKey: (env.GOOGLE_MAPS_SERVER_KEY || '').trim(),
+    googleMapsBrowserKey: (env.GOOGLE_MAPS_BROWSER_KEY || '').trim(),
+    googleMapsMapId: (env.GOOGLE_MAPS_MAP_ID || '').trim(),
     locationiqKey: (env.LOCATIONIQ_API_KEY || '').trim(),
     geoapifyKey: (env.GEOAPIFY_API_KEY || '').trim(),
     nominatimEmail: (env.NOMINATIM_EMAIL || '').trim(),
@@ -103,6 +111,8 @@ function normalizeLoadedConfig(input: unknown, defaults: RuntimeConfig): Runtime
   const record = normalizePersistedConfig(input);
   return {
     googleServerKey: stringFromPersisted(record, 'googleServerKey', defaults),
+    googleMapsBrowserKey: stringFromPersisted(record, 'googleMapsBrowserKey', defaults),
+    googleMapsMapId: stringFromPersisted(record, 'googleMapsMapId', defaults),
     locationiqKey: stringFromPersisted(record, 'locationiqKey', defaults),
     geoapifyKey: stringFromPersisted(record, 'geoapifyKey', defaults),
     nominatimEmail: stringFromPersisted(record, 'nominatimEmail', defaults),
@@ -191,6 +201,8 @@ export async function updateRuntimeConfig(patch: RuntimeConfigPatch): Promise<Ru
   }
   const allowed = new Set<keyof RuntimeConfig>([
     'googleServerKey',
+    'googleMapsBrowserKey',
+    'googleMapsMapId',
     'locationiqKey',
     'geoapifyKey',
     'nominatimEmail',

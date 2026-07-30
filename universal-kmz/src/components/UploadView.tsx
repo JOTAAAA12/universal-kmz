@@ -308,7 +308,7 @@ export default function UploadView({
                 type="password"
                 value={apiKey}
                 onChange={(e) => setApiKey(e.target.value)}
-                placeholder={process.env.GOOGLE_MAPS_BROWSER_KEY ? 'Preenchida via Segredo do Sistema' : 'Cole sua chave pública para visualizar o mapa'}
+                placeholder="Cole sua chave pública para visualizar o mapa"
                 className="w-full p-2.5 border border-slate-300 rounded font-mono focus:border-indigo-500 focus:outline-none transition text-xs bg-slate-50/50"
               />
               <p className="text-[11px] text-slate-400 flex items-center gap-1">
