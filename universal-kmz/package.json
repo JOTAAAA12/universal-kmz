@@ -2,6 +2,7 @@
   "name": "universal-kmz",
   "private": true,
   "version": "1.0.0",
+  "license": "MIT",
   "description": "Leitor de KML/KMZ com geocodificação de endereços (Google, OpenStreetMap, CNEFE/IBGE offline).",
   "author": "Universal KMZ",
   "type": "module",
