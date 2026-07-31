@@ -6,3 +6,7 @@ dist/
 graphify-out/
 universal-kmz/dados/
 universal-kmz/release/
+
+# Executaveis: vao para os Releases do GitHub, nunca para o git (limite de 100MB)
+*.exe
+release/
