@@ -1,0 +1,59 @@
+name: Temporary Legal Collection Transfer
+
+on:
+  push:
+    paths:
+      - '.github/workflows/temporary-legal-transfer.yml'
+      - 'tmp/legal-transfer-trigger.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  transfer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Download Lote 001 package
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 --retry-all-errors \
+            'https://zrtztmmtjqzgxeyotrvn.supabase.co/functions/v1/legal-collector-lote1?token=sN1shVK10mnHmoF4sOT-c8UGom3IUZ6e&mode=zip' \
+            --output Cerebro_Tributario_Lote_001_50_normas_oficiais.zip
+          test -s Cerebro_Tributario_Lote_001_50_normas_oficiais.zip
+
+      - name: Verify ZIP structure
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+          p = Path('Cerebro_Tributario_Lote_001_50_normas_oficiais.zip')
+          with ZipFile(p) as z:
+              bad = z.testzip()
+              if bad:
+                  raise SystemExit(f'corrupt entry: {bad}')
+              names = z.namelist()
+              md = [n for n in names if '/01_Markdown/' in n and n.endswith('.md')]
+              html = [n for n in names if '/02_Originais_HTML/' in n and n.endswith('.html')]
+              if len(md) != 50:
+                  raise SystemExit(f'expected 50 MD, found {len(md)}')
+              if len(html) != 50:
+                  raise SystemExit(f'expected 50 HTML, found {len(html)}')
+              print({'zip_bytes': p.stat().st_size, 'markdown': len(md), 'html': len(html), 'entries': len(names)})
+          PY
+          sha256sum Cerebro_Tributario_Lote_001_50_normas_oficiais.zip > Cerebro_Tributario_Lote_001_50_normas_oficiais.zip.sha256
+
+      - name: Upload verified package
+        uses: actions/upload-artifact@v4
+        with:
+          name: Cerebro_Tributario_Lote_001_50_normas_oficiais
+          path: |
+            Cerebro_Tributario_Lote_001_50_normas_oficiais.zip
+            Cerebro_Tributario_Lote_001_50_normas_oficiais.zip.sha256
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
