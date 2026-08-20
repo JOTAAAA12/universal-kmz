@@ -1,0 +1,17 @@
+name: Tax Collector Smoke
+
+on:
+  push:
+    branches: [taxcollector-run-20260820]
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python --version
+      - run: echo ok > smoke.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: smoke
+          path: smoke.txt
