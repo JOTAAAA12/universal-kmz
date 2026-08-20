@@ -1,0 +1,67 @@
+name: Executar Coleta Tributaria
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  coletar:
+    if: startsWith(github.head_ref, 'taxcollector-run-')
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    defaults:
+      run:
+        working-directory: taxcollector-run
+    env:
+      PYTHONUNBUFFERED: "1"
+      LEXML_PAGE_SIZE: "250"
+      LEXML_MAX_PAGES: "8"
+      FETCH_WORKERS: "12"
+      HTTP_TIMEOUT: "45"
+      REQUEST_DELAY: "0.10"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: taxcollector-run/requirements.txt
+
+      - name: Dependencias
+        run: pip install -r requirements.txt
+
+      - name: Testes
+        run: pytest -q
+
+      - name: Coleta
+        run: python run_collection.py --output output
+
+      - name: Validacao
+        run: python validate_output.py output
+
+      - name: Pacote
+        run: |
+          python - <<'PY'
+          import shutil
+          shutil.make_archive('Cerebro_Tributario_RJSP_Coleta', 'zip', 'output')
+          PY
+          sha256sum Cerebro_Tributario_RJSP_Coleta.zip > Cerebro_Tributario_RJSP_Coleta.zip.sha256
+
+      - name: Artefato
+        uses: actions/upload-artifact@v4
+        with:
+          name: Cerebro_Tributario_RJSP_Coleta
+          path: |
+            taxcollector-run/Cerebro_Tributario_RJSP_Coleta.zip
+            taxcollector-run/Cerebro_Tributario_RJSP_Coleta.zip.sha256
+            taxcollector-run/output/RELATORIO_EXECUCAO.md
+            taxcollector-run/output/inventario_mestre.csv
+            taxcollector-run/output/manifesto.json
+          if-no-files-found: error
+          retention-days: 30
