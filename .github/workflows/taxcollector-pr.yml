@@ -17,6 +17,7 @@ jobs:
         working-directory: taxcollector-run
     env:
       PYTHONUNBUFFERED: "1"
+      PYTHONPATH: ${{ github.workspace }}/taxcollector-run
       LEXML_PAGE_SIZE: "250"
       LEXML_MAX_PAGES: "8"
       FETCH_WORKERS: "12"
@@ -37,7 +38,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Testes
-        run: pytest -q
+        run: python -m pytest -q
 
       - name: Coleta
         run: python run_collection.py --output output
